@@ -596,12 +596,6 @@ echo "=== [Quasar QEMU Emulator] Booting board=$BOARD maind_mode=$MODE ==="
 # If host passed an updated qemu-hw-bridge binary via second virtio drive (/dev/vdb), hot-update it before launch
 # The bridge may arrive on /dev/vdb or /dev/vdc depending on whether a data
 # disk is attached, so probe both for an ELF payload.
-# A copy kept on the persistent data disk wins: it survives image rebuilds and
-# is the easiest way to carry a locally built bridge between boots.
-if [ -x /data/qemu-hw-bridge ]; then
-  cp -f /data/qemu-hw-bridge /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
-  chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
-fi
 for _brdev in /dev/vdc /dev/vdb; do
   [ -b "$_brdev" ] || continue
   [ "$(dd if="$_brdev" bs=4 count=1 2>/dev/null)" = "$(printf '\177ELF')" ] || continue
@@ -609,6 +603,13 @@ for _brdev in /dev/vdc /dev/vdb; do
   chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
   break
 done
+# A copy kept on the persistent data disk wins (applied last on purpose): the
+# virtio drive can still carry an older build, e.g. when the host has a stale
+# image attached, and /data survives image rebuilds.
+if [ -x /data/qemu-hw-bridge ]; then
+  cp -f /data/qemu-hw-bridge /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
+  chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
+fi
 /usr/local/bin/qemu-hw-bridge >/tmp/hw-bridge.log 2>&1 &
 sleep 0.4
 
