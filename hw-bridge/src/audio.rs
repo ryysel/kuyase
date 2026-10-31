@@ -187,7 +187,11 @@ pub fn spawn_alsa_loopback_capture(state: Arc<BridgeState>) {
             }
         }
         let _ = child.wait();
-        thread::sleep(Duration::from_millis(500));
+        // The capture child exits on an ALSA overrun. A 500 ms gap left the
+        // loopback undrained long enough for the playback side to xrun, which
+        // surfaced as a dropout every ~25 s. Restart at once; the short sleep
+        // only guards against a spin when the child cannot start at all.
+        thread::sleep(Duration::from_millis(20));
     });
 }
 

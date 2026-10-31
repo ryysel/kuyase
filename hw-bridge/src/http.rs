@@ -117,15 +117,17 @@ fn handle_http(mut stream: TcpStream, state: Arc<BridgeState>) -> std::io::Resul
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(0)
             & !3;
-        let wav = {
+        // Copy under the lock, encode outside: the capture thread appends every
+        // 20 ms and must not wait for a multi-megabyte WAV to be built.
+        let pcm = {
             let cap = state.captured_pcm.lock().unwrap();
-            let slice = if from_offset < cap.len() {
-                &cap[from_offset..]
+            if from_offset < cap.len() {
+                cap[from_offset..].to_vec()
             } else {
-                &[][..]
-            };
-            build_wav_bytes(slice, 48_000, 2)
+                Vec::new()
+            }
         };
+        let wav = build_wav_bytes(&pcm, 48_000, 2);
         return send_resp(&mut stream, "200 OK", "audio/wav", &wav);
     }
 
