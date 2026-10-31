@@ -515,8 +515,9 @@ pcm.dmix_spk {
     rate 48000
     channels 2
     format S16_LE
-    period_size 1024
-    buffer_size 8192
+    # TCG jitter: 680 ms of buffer keeps AirPlay from underrunning
+    period_size 4096
+    buffer_size 32768
   }
 }
 
