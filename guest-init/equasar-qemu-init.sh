@@ -594,10 +594,21 @@ echo "=== [Quasar QEMU Emulator] Booting board=$BOARD maind_mode=$MODE ==="
 
 # 9. Start Virtual Speaker Twin & Hardware Bridge (:8091)
 # If host passed an updated qemu-hw-bridge binary via second virtio drive (/dev/vdb), hot-update it before launch
-if [ -b /dev/vdb ] && [ "$(dd if=/dev/vdb bs=4 count=1 2>/dev/null)" = "$(printf '\177ELF')" ]; then
-  cat /dev/vdb > /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
+# The bridge may arrive on /dev/vdb or /dev/vdc depending on whether a data
+# disk is attached, so probe both for an ELF payload.
+# A copy kept on the persistent data disk wins: it survives image rebuilds and
+# is the easiest way to carry a locally built bridge between boots.
+if [ -x /data/qemu-hw-bridge ]; then
+  cp -f /data/qemu-hw-bridge /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
   chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
 fi
+for _brdev in /dev/vdc /dev/vdb; do
+  [ -b "$_brdev" ] || continue
+  [ "$(dd if="$_brdev" bs=4 count=1 2>/dev/null)" = "$(printf '\177ELF')" ] || continue
+  cat "$_brdev" > /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
+  chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
+  break
+done
 /usr/local/bin/qemu-hw-bridge >/tmp/hw-bridge.log 2>&1 &
 sleep 0.4
 
