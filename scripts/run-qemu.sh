@@ -12,6 +12,7 @@ BOARD=""
 MODE="stub"
 DUMP_PATH=""
 REBUILD=0
+PORT_OFFSET=0
 BRIDGE_PORT=18091
 SDK_PORT=18090
 ADB_PORT=15555
@@ -29,6 +30,7 @@ usage() {
       --bridge-port <порт> Порт 2D-визуализатора Virtual Speaker Twin (по умолчанию: 18091)
       --sdk-port <порт>    Проброс гостевого порта :8090 на хост (по умолчанию: 18090)
       --adb-port <порт>    Проброс гостевого ADB :5555 на хост (по умолчанию: 15555)
+    --port-offset <n>    Смещение всех хостовых портов (для параллельного запуска)
   -h, --help               Показать эту справку
 
 Примеры:
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
     --bridge-port)    BRIDGE_PORT="$2"; shift 2 ;;
     --sdk-port)       SDK_PORT="$2"; shift 2 ;;
     --adb-port)       ADB_PORT="$2"; shift 2 ;;
+    --port-offset)    PORT_OFFSET="$2"; shift 2 ;;
     -h|--help)        usage; exit 0 ;;
     -*)               echo "[kuyase] Неизвестная опция: $1"; usage; exit 1 ;;
     *)
@@ -138,6 +141,8 @@ case "${BOARD}" in
   station-lite|lite|lite1|micro) BOARD="yandexmicro" ;;
   mini|mini1)                    BOARD="yandexmini" ;;
   mini2|yandexmini_2)            BOARD="yandexmini2" ;;
+  mini2nc|yandexmini2nc)         BOARD="yandexmini2nc" ;;
+  prune|lite2nc|plumnc)          BOARD="plumnc" ;;
   mini3)                         BOARD="bergamot" ;;
   mini3pro)                      BOARD="pickle" ;;
   lite2)                         BOARD="plum" ;;
@@ -174,7 +179,17 @@ if [ ! -f "${DRIVE_IMG}" ]; then
   exit 1
 fi
 
-HOST_FWD="hostfwd=tcp:127.0.0.1:${BRIDGE_PORT}-:8091,hostfwd=tcp:127.0.0.1:${ADB_PORT}-:5555,hostfwd=tcp:127.0.0.1:${SDK_PORT}-:8090"
+SMP=2
+if [ "${PORT_OFFSET}" -gt 0 ] 2>/dev/null; then
+  BRIDGE_PORT=$((BRIDGE_PORT + PORT_OFFSET))
+  SDK_PORT=$((SDK_PORT + PORT_OFFSET))
+  ADB_PORT=$((ADB_PORT + PORT_OFFSET))
+  # Parallel rollout keeps two vCPUs: Luna needs a second tokio worker so a
+  # blocking plugin rescan cannot starve its HTTP API.
+  SMP=2
+fi
+
+HOST_FWD="hostfwd=tcp:0.0.0.0:${BRIDGE_PORT}-:8091,hostfwd=tcp:127.0.0.1:${ADB_PORT}-:5555,hostfwd=tcp:127.0.0.1:${SDK_PORT}-:8090"
 
 BRIDGE_BIN=""
 CARGO_BRIDGE="${REPO_ROOT}/hw-bridge/target/armv7-unknown-linux-musleabihf/release/qemu-hw-bridge"
@@ -190,9 +205,28 @@ elif [ -f "${REL_BRIDGE}" ]; then
   BRIDGE_BIN="${REL_BRIDGE}"
 fi
 
+# Optional LAN presence: a pre-created tap device attached to a dedicated
+# bridge (e.g. br-emu on the USB NIC). It is a second virtio NIC; management
+# stays on the user-mode NIC so the host IP and DNS are untouched.
+LAN_ARGS=()
+if [ -n "${KUYASE_LAN_TAP:-}" ] && [ -e "/sys/class/net/${KUYASE_LAN_TAP}" ]; then
+  LAN_ARGS=(-netdev "tap,ifname=${KUYASE_LAN_TAP},script=no,downscript=no,id=lan0"
+            -device "virtio-net-pci,netdev=lan0,mac=${KUYASE_LAN_MAC:-52:54:00:99:00:01}")
+elif [ -n "${KUYASE_LAN_TAP:-}" ]; then
+  echo "[kuyase] LAN tap ${KUYASE_LAN_TAP} not available; user networking only"
+fi
+
 EXTRA_DRIVE_ARGS=()
 if [ -n "${BRIDGE_BIN}" ] && [ -f "${BRIDGE_BIN}" ]; then
   EXTRA_DRIVE_ARGS=(-drive "file=${BRIDGE_BIN},if=virtio,format=raw,readonly=on")
+fi
+
+# Optional persistent /data disk (never part of the distributed image).
+DATA_IMG="${WORK_DIR}/${BOARD}-data.ext4"
+DATA_CMDLINE=""
+if [ -f "${DATA_IMG}" ]; then
+  EXTRA_DRIVE_ARGS+=(-drive "file=${DATA_IMG},if=virtio,format=raw")
+  DATA_CMDLINE=" quasar.data=persist"
 fi
 
 echo "=================================================================="
@@ -204,12 +238,18 @@ echo " -> Forwarded Guest SDK Port     : 127.0.0.1:${SDK_PORT} -> guest :8090"
 echo " -> Stop Emulator                : Press Ctrl+C or Ctrl+D (or Enter for root shell)"
 echo "=================================================================="
 
+CONSOLE_ARGS=(-nographic)
+if [ "${KUYASE_HEADLESS:-0}" = "1" ]; then
+  CONSOLE_ARGS=(-display none -serial null)
+fi
+
 exec "${QEMU_BIN}" \
-  -M virt -cpu cortex-a53 -smp 2 -m 512M \
+  -M virt -cpu cortex-a53 -smp ${SMP} -m 512M \
   -kernel "${KERNEL_IMG}" \
-  -append "console=ttyAMA0 root=/dev/vda rw ip=dhcp init=/quasar-qemu-init.sh quasar.board=${BOARD} quasar.mode=${MODE} panic=-1" \
+  -append "console=ttyAMA0 root=/dev/vda rw ip=dhcp init=/quasar-qemu-init.sh quasar.board=${BOARD} quasar.mode=${MODE}${DATA_CMDLINE} androidboot.serialno=EMU0001 panic=-1" \
   -drive "file=${DRIVE_IMG},if=virtio,format=raw" \
   "${EXTRA_DRIVE_ARGS[@]}" \
   -netdev "user,id=net0,${HOST_FWD}" \
   -device virtio-net-pci,netdev=net0 \
-  -nographic
+  "${LAN_ARGS[@]}" \
+  "${CONSOLE_ARGS[@]}"
