@@ -77,7 +77,7 @@ if ($Slug -eq "unknown") {
     elseif ($ModelRaw -match "orion") { $Slug = "orion" }
     elseif ($ModelRaw -match "prune") { $Slug = "plumnc" }
     elseif ($ModelRaw -match "plum") { $Slug = "plum" }
-    elseif ($ModelRaw -match "mango") { $Slug = "mango" }
+    elseif ($ModelRaw -match "mango|street") { $Slug = "mango" }
     elseif ($ModelRaw -match "saturn") { $Slug = "saturn" }
     elseif ($ModelRaw -match "station-midi") { $Slug = "station2" }
     elseif ($ModelRaw -match "yandexmini2nc|mini2nc") { $Slug = "yandexmini2nc" }

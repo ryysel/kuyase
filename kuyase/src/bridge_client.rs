@@ -182,7 +182,10 @@ impl BridgeClient {
                 }
                 let rem = ack_deadline.saturating_duration_since(Instant::now());
                 if rem.is_zero() {
-                    return Err("timed out waiting for CommandAck from bridge".to_string());
+                    return Err(format!(
+                        "timed out waiting for CommandAck from bridge (cmd={:?})",
+                        cmd
+                    ));
                 }
                 let (next_guard, _) = cv.wait_timeout(guard, rem).unwrap();
                 guard = next_guard;
@@ -256,9 +259,11 @@ mod tests {
 
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut snap = BridgeStateSnapshot::default();
-            snap.board_slug = "yandexmini2".to_string();
-            snap.volume_level = 5;
+            let mut snap = BridgeStateSnapshot {
+                board_slug: "yandexmini2".to_string(),
+                volume_level: 5,
+                ..Default::default()
+            };
             write_guest_packet(&mut stream, &GuestPacket::StateSnapshot(snap.clone())).unwrap();
 
             // Stream a PCM audio chunk

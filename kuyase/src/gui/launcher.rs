@@ -237,7 +237,7 @@ pub fn render_launcher_pane(ui: &mut egui::Ui, app: &mut GuiAppState) {
             } else {
                 // Вариант 2: Из файла дампа (в том же стиле, что и настройки путей)
                 let dump_trimmed = app.config.selected_dump_path.trim().to_string();
-                let dump_exists = !dump_trimmed.is_empty() && Path::new(&dump_trimmed).is_file();
+                let dump_exists = !dump_trimmed.is_empty() && Path::new(&dump_trimmed).exists();
                 let (dump_dot_col, dump_display, dump_text_col) = if dump_exists {
                     (
                         Color32::from_rgb(100, 230, 135),
@@ -685,12 +685,7 @@ fn spawn_prepare_task(app: &mut GuiAppState, board: Option<String>, dump: Option
     *status.lock().unwrap() = "Сборка образа .ext4 в userspace...".to_string();
 
     thread::spawn(move || {
-        let res = match dump {
-            Some(ref dp) => {
-                build_guest_image_from_dump(&root, board.as_deref(), dp, None).map(|r| vec![r])
-            }
-            None => prepare_images(&root, board.as_deref(), None),
-        };
+        let res = prepare_images(&root, board.as_deref(), dump.as_deref());
         match res {
             Ok(built) => {
                 let names: Vec<String> = built.into_iter().map(|(b, _)| b).collect();

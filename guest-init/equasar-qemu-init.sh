@@ -114,10 +114,18 @@ if [ "$BOARD" = "auto" ] || [ -z "$BOARD" ]; then
         BOARD="plum"
       fi
       ;;
-    station_2|station-midi|yandexmidi) BOARD="station2" ;;
+    station_2|station-midi|yandexmidi)
+      if [ -e /boot/yandex-cucumber-i2ctop-overlay.dtb ]; then
+        BOARD="cucumber"
+      else
+        BOARD="station2"
+      fi
+      ;;
     "")
       if [ -e /lib/firmware/bergamot-acm8625.cfg ]; then
         BOARD="bergamot"
+      elif [ -e /lib/firmware/mango-acm8625.cfg ]; then
+        BOARD="mango"
       elif [ -e /etc/init.d/S61leds_brightness ]; then
         BOARD="yandexmini2"
       elif [ -e /boot/yandex-cucumber-i2ctop-overlay.dtb ]; then
@@ -149,8 +157,19 @@ esac
 export QUASAR_BOARD="$BOARD"
 hostname "qemu-${BOARD}" 2>/dev/null || true
 
-# 2. Ensure loopback is up (eth0 is configured via kernel `ip=dhcp`)
+# 2. Ensure loopback is up (eth0 is configured via kernel `ip=dhcp`) and DNS resolver is configured
 ip link set lo up 2>/dev/null || ifconfig lo 127.0.0.1 up 2>/dev/null || true
+cat > /tmp/resolv.conf << 'EOF'
+nameserver 10.0.2.3
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+if ! grep -q '^nameserver ' /etc/resolv.conf 2>/dev/null; then
+  rm -f /etc/resolv.conf 2>/dev/null || true
+  cp -f /tmp/resolv.conf /etc/resolv.conf 2>/dev/null || ln -sfn /tmp/resolv.conf /etc/resolv.conf 2>/dev/null || true
+fi
+printf 'check_certificate = off\n' > /root/.wgetrc 2>/dev/null || true
+printf 'check_certificate = off\n' > /.wgetrc 2>/dev/null || true
 
 # 2b. Optional LAN NIC. When the host passes a second virtio NIC (52:4b:59:xx,
 # a tap on a dedicated bridge) the speaker lives directly on the physical LAN,
@@ -216,7 +235,9 @@ rm -f /etc/shadow 2>/dev/null || true
 # 4. Start ADB daemon (TCP :5555)
 rm -rf /dev/usb-ffs 2>/dev/null || true
 if [ -x /usr/bin/adbd ]; then
+  set -m
   /usr/bin/adbd </dev/null >/tmp/adbd.log 2>&1 &
+  set +m
 fi
 
 # 5. Spoof /proc/device-tree (`model` & `compatible`) and /sys/devices/virtual/dmi/id via bind/tmpfs
@@ -225,7 +246,8 @@ mkdir -p /tmp/fake-dt /sys/devices/virtual/dmi/id /sys/firmware/devicetree
 case "$BOARD" in
   cucumber)
     printf "Yandex Cucumber DVT2\0" > /tmp/fake-dt/model
-    printf "yandex,cucumber-dvt2\0amlogic,a5\0" > /tmp/fake-dt/compatible
+    printf "yandex,cucumber-dvt2\0yandex,cucumber\0amlogic, a5\0" > /tmp/fake-dt/compatible
+    printf "a5_cucumber_dvt2\0" > /tmp/fake-dt/amlogic-dt-id
     BOARD_NAME="Яндекс Станция Миди (YNDX-00054 / cucumber)"
     SYSFS_PREFIX="cucumber"; RING_LEDS=24; LOGO_LEDS=6; AMBILIGHT_LEDS=0; HAS_CLOCK="true"; LED_DRIVER="framebuffer"
     ;;
@@ -282,7 +304,7 @@ case "$BOARD" in
     ;;
   station2)
     printf "Yandex Station Midi\0" > /tmp/fake-dt/model
-    printf "yandex,station-midi\0amlogic,axg\0" > /tmp/fake-dt/compatible
+    printf "yandex,station-midi\0amlogic, axg\0" > /tmp/fake-dt/compatible
     BOARD_NAME="Яндекс Станция 2 (YNDX-00051 / station-midi)"
     SYSFS_PREFIX="station2"; RING_LEDS=88; LOGO_LEDS=0; AMBILIGHT_LEDS=0; HAS_CLOCK="false"; LED_DRIVER="framebuffer"
     ;;
@@ -290,7 +312,7 @@ case "$BOARD" in
     printf "Yandex Station Mango DVT\0" > /tmp/fake-dt/model
     printf "yandex,mango\0amlogic,a1\0" > /tmp/fake-dt/compatible
     BOARD_NAME="Яндекс Станция Стрит (mango)"
-    SYSFS_PREFIX="mango"; RING_LEDS=4; LOGO_LEDS=3; AMBILIGHT_LEDS=0; HAS_CLOCK="false"; LED_DRIVER="sysfs"
+    SYSFS_PREFIX="mango"; RING_START=1; RING_LEDS=4; LOGO_LEDS=3; AMBILIGHT_LEDS=0; HAS_CLOCK="false"; LED_DRIVER="framebuffer"
     ;;
   saturn)
     printf "Yandex Saturn\0" > /tmp/fake-dt/model
@@ -301,6 +323,7 @@ case "$BOARD" in
   yandexmini)
     printf "Amlogic\0" > /tmp/fake-dt/model
     printf "amlogic, axg\0" > /tmp/fake-dt/compatible
+    printf "axg_s420_v03\0" > /tmp/fake-dt/amlogic-dt-id
     BOARD_NAME="Яндекс Станция Мини 1 (YNDX-0004 / yandexmini)"
     SYSFS_PREFIX="yandexmini"; RING_LEDS=6; LOGO_LEDS=0; AMBILIGHT_LEDS=0; HAS_CLOCK="false"; LED_DRIVER="i2c_sn3236"
     ;;
@@ -379,9 +402,22 @@ else
   echo "ring" > /sys/class/graphics/fb0/name
   echo "YNDX LED screen" > /sys/class/graphics/fb1/name
   case "$BOARD" in
-    station2) write_fb_geom fb0 89 1 24 ;;
-    cucumber) write_fb_geom fb0 30 ;;
-    bergamot) write_fb_geom fb0 6 1 24 ;;
+    station2)
+      write_fb_geom fb0 89 1 24
+      ;;
+    cucumber)
+      echo "logo" > /sys/class/graphics/fb1/name
+      write_fb_geom fb0 24 1 24
+      write_fb_geom fb1 6 1 24
+      ;;
+    bergamot)
+      write_fb_geom fb0 6 1 24
+      ;;
+    mango)
+      echo "logo" > /sys/class/graphics/fb1/name
+      write_fb_geom fb0 4 1 24
+      write_fb_geom fb1 3 1 24
+      ;;
   esac
   echo 255 > /sys/class/backlight/fb0/brightness
   echo 255 > /sys/class/backlight/fb1/brightness
@@ -440,6 +476,14 @@ if [ "$LED_DRIVER" != "i2c_sn3236" ]; then
         echo 255 > "$d/max_brightness"
         echo "[ledfb-${bus}-sync] none" > "$d/trigger"
       done
+    done
+  elif [ "$BOARD" = "cucumber" ]; then
+    for snode in "logo:sync" "ringA:sync" "ringB:sync" "sync:clock-0" "sync:clock-1"; do
+      d="/sys/class/leds/cucumber:${snode}"
+      mkdir -p "$d"
+      echo 0 > "$d/brightness"
+      echo 255 > "$d/max_brightness"
+      echo "none" > "$d/trigger"
     done
   fi
 
@@ -574,6 +618,41 @@ elif [ "$BOARD" = "bergamot" ]; then
   echo 12000 > /sys/class/power_supply/ya_pd/voltage_now
   echo 1500 > /sys/class/power_supply/ya_pd/current_now
   echo '[{"name":"main","assembly":"00000000001"}]' > /sys/devices/platform/pcba_ids/pcba_ids_drv/pcba_ids
+elif [ "$BOARD" = "mango" ]; then
+  mkdir -p /sys/bus/i2c/devices/2-002c
+  echo "acm8625s" > /sys/bus/i2c/devices/2-002c/name
+  echo "mango-acm8625.cfg" > /sys/bus/i2c/devices/2-002c/settings_file
+  echo "mango-acm8625.cfg" > /sys/bus/i2c/devices/2-002c/default_settings
+  ln -sfn /sys/bus/i2c/devices/2-002c/settings_file /tmp/amp_settings_file
+  ln -sfn /sys/bus/i2c/devices/2-002c/default_settings /tmp/amp_default_settings
+  mkdir -p /sys/devices/virtual/cw2217_cls/cw2217_coulomb \
+           /sys/devices/virtual/ip2366_cls/ip2366_charger \
+           /sys/class/power_supply/battery \
+           /sys/devices/platform/charge-animation \
+           /sys/devices/platform/logo-animation \
+           /sys/devices/platform/pcba_ids/pcba_ids_drv
+  echo 85 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/capacity
+  echo 7800 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/battery_vol
+  echo 500 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/battery_current
+  echo 280 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/battery_temp
+  echo 100 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/soh
+  echo 12 > /sys/devices/virtual/cw2217_cls/cw2217_coulomb/cycle
+  echo 1 > /sys/devices/virtual/ip2366_cls/ip2366_charger/charge_status
+  echo 1 > /sys/devices/virtual/ip2366_cls/ip2366_charger/is_pd
+  echo 12000 > /sys/devices/virtual/ip2366_cls/ip2366_charger/charge_voltage
+  echo "PD" > /sys/devices/virtual/ip2366_cls/ip2366_charger/pd_protocol
+  echo 1 > /sys/devices/virtual/ip2366_cls/ip2366_charger/switch_charge
+  echo "Battery" > /sys/class/power_supply/battery/type
+  echo "Charging" > /sys/class/power_supply/battery/status
+  echo 1 > /sys/class/power_supply/battery/present
+  echo 85 > /sys/class/power_supply/battery/capacity
+  echo 7800000 > /sys/class/power_supply/battery/voltage_now
+  echo 500000 > /sys/class/power_supply/battery/current_now
+  echo 280 > /sys/class/power_supply/battery/temp
+  echo "Good" > /sys/class/power_supply/battery/health
+  echo 0 > /sys/devices/platform/charge-animation/stop
+  echo 0 > /sys/devices/platform/logo-animation/stop
+  echo '[{"name":"main","assembly":"1"},{"name":"third_mic_board","assembly":"1"}]' > /sys/devices/platform/pcba_ids/pcba_ids_drv/pcba_ids
 fi
 
 # 8. Configure ALSA (/etc/asound.conf & /tmp/alsa/alsa.conf) for snd-aloop (card 0: Loopback)
@@ -720,7 +799,9 @@ if [ -x /data/qemu-hw-bridge ]; then
   cp -f /data/qemu-hw-bridge /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
   chmod 0755 /usr/local/bin/qemu-hw-bridge 2>/dev/null || true
 fi
-/usr/local/bin/qemu-hw-bridge >/tmp/hw-bridge.log 2>&1 &
+set -m
+/usr/local/bin/qemu-hw-bridge </dev/null >/tmp/hw-bridge.log 2>&1 &
+set +m
 sleep 0.4
 
 # 11. Run any user-installed /etc/init.d/S99* startup scripts (skipping firmware S99onboot.sh / S99zdropbear)
@@ -728,7 +809,7 @@ for s in /etc/init.d/S99*; do
   [ -e "$s" ] || continue
   bname=$(basename "$s")
   case "$bname" in
-    S99onboot.sh|S99quasar*|S99zdropbear|S99dropbear*|S99adbd*)
+    S99onboot.sh|S99quasar*|S99zdropbear|S99dropbear*|S99*ssh*|S99*alicebridge*|S99adbd*)
       continue
       ;;
   esac

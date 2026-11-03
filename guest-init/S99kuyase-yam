@@ -1,19 +1,21 @@
 #!/bin/sh
-# Start an optional YAM v2 / Luna stack installed on the persistent /data disk.
+# Start an optional YAM v0.2+ / Luna stack installed on the persistent /data disk.
 # Rendered into the guest image as /etc/init.d/S99kuyase-yam. Does nothing
-# unless /data/yam/bin/luna exists, so stock images stay untouched.
-[ -x /data/yam/bin/luna ] || exit 0
+# unless /data/yam/bin/yam-run or /data/yam/bin/luna exists, so stock images stay untouched.
+if [ -x /data/yam/bin/yam-run ] && [ ! -e /usr/bin/yam ]; then
+  ln -sfn /data/yam/bin/yam-run /usr/bin/yam 2>/dev/null || true
+fi
 
-MODEL="$(cat /data/yam/model 2>/dev/null || echo yandexmini_2)"
+[ -x /data/yam/bin/luna ] || exit 0
 
 # The native-volume stub must be up before AirPlay writes volume through the
 # station-volume launcher. It is a passive listener; the busy `native-volume
-# watch` is what used to eat a CPU core, and that is not started.
+# watch` would eat a whole vCPU under TCG.
 if [ -x /data/volume-stub ] && ! pidof volume-stub >/dev/null 2>&1; then
   nohup /data/volume-stub >/tmp/volume-stub.log 2>&1 &
 fi
 
-mkdir -p /data/luna /tmp/yam
+mkdir -p /tmp/yam /data/yam/var/luna/data
 touch /data/yam/yam.lock
 
 # Luna's own boot auto-start runs while its HTTP API is not yet answering, so
@@ -23,34 +25,45 @@ touch /data/yam/yam.lock
 # enabled on the bench survives a reboot exactly like on a real speaker.
 #
 # Do NOT auto-start station.volume: `native-volume watch` busy-loops in the
-# emulator, eats a whole vCPU and starves Luna's HTTP API. AirPlay runs with
-# native_volume=false, so the plugin is only needed for its guard script.
-state=/data/luna/plugins/services.json
+# emulator, eats a whole vCPU and starves Luna's HTTP API.
+state=/data/yam/var/luna/data/plugins/services.json
 saved_services=
 if [ -f "$state" ]; then
   saved_services=$(sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' "$state" 2>/dev/null | tr '\n' ' ')
 fi
-if [ -d /data/luna/plugins ]; then
+if [ -d /data/yam/var/luna/data/plugins ]; then
   printf '[]\n' > "$state"
 fi
 
 if ! pidof luna >/dev/null 2>&1; then
-  nohup /data/yam/bin/luna --listen 127.0.0.1:8099 --data-dir /data/luna \
-    --model "$MODEL" --yam-root /data/yam --yam-run /data/yam \
-    >>/tmp/luna.log 2>&1 &
+  nohup /data/yam/bin/luna --listen 0.0.0.0:8099 --data-dir /data/yam/var/luna/data \
+    >>/data/yam/var/luna/luna.log 2>&1 &
 fi
 
-if [ -x /data/luna-ctl ]; then
-  /data/luna-ctl wait || exit 0
+# Wait up to 30s for Luna's HTTP API on :8099
+i=0
+while [ "$i" -lt 30 ]; do
+  if wget -qO- http://127.0.0.1:8099/api/device >/dev/null 2>&1; then
+    break
+  fi
+  i=$((i + 1))
+  sleep 1
+done
 
-  # Re-enable everything that was enabled before the reboot. station.airplay
-  # has its own start logic below.
+# Re-enable everything that was enabled before the reboot. station.airplay
+# has its own start logic below.
+if [ -x /data/luna-ctl ] && [ -n "$saved_services" ]; then
+  /data/luna-ctl wait || true
   for id in $saved_services; do
     case "$id" in
       station.airplay) continue ;;
     esac
     /data/luna-ctl enable "$id" >/dev/null 2>&1 || true
   done
+fi
+
+if [ -x /data/luna-ctl ]; then
+  /data/luna-ctl wait || exit 0
 
   airplay_up() {
     /data/luna-ctl running station.airplay >/dev/null 2>&1 \

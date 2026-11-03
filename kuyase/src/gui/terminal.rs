@@ -42,6 +42,18 @@ const SERIAL_SNIPPETS: &[(&str, &str)] = &[
         "cd /sys/class/leds;for f in $(seq 1 24);do for i in $(seq 0 11);do echo $((((i+f)%3==0)*250))>orion:red:ambilight${i}a/brightness;echo $((((i+f)%3==1)*250))>orion:green:ambilight${i}a/brightness;echo $((((i+f)%3==2)*250))>orion:blue:ambilight${i}b/brightness;done;usleep 50000;done",
     ),
     (
+        "Mango (Стрит): Кулонометр CW2217 + зарядка IP2366 PD + battery",
+        "head -n 1 /sys/devices/virtual/cw2217_cls/cw2217_coulomb/* /sys/devices/virtual/ip2366_cls/ip2366_charger/* /sys/class/power_supply/battery/*",
+    ),
+    (
+        "Mango (Стрит): Усилитель ACM8625S (2-002c) и ревизии pcba_ids",
+        "head -n 1 /sys/bus/i2c/devices/2-002c/name /sys/bus/i2c/devices/2-002c/settings_file /tmp/amp_settings_file /sys/devices/platform/pcba_ids/pcba_ids_drv/pcba_ids",
+    ),
+    (
+        "Mango / Cucumber: Логотип (/dev/fb1) — тест цветов Алисы",
+        "printf '\\x00\\xff\\x80\\x6b\\x0f\\xff\\x22\\xcc\\xff\\x00\\xff\\x80\\x6b\\x0f\\xff\\x22\\xcc\\xff' > /dev/fb1",
+    ),
+    (
         "Mini 1 (SN3236): Теневые регистры I2C 0x3c -> защёлка 0x25",
         "i2cset -y 0 0x3c 0x00 0x01; for r in $(seq 1 3 16); do i2cset -y 0 0x3c $r 0xff; i2cset -y 0 0x3c $((r+1)) 0x40; i2cset -y 0 0x3c $((r+2)) 0x90; done; sleep 1; i2cset -y 0 0x3c 0x25 0x01",
     ),
@@ -51,15 +63,7 @@ const SERIAL_SNIPPETS: &[(&str, &str)] = &[
     ),
 ];
 
-fn set_text_edit_cursor_to_end(ctx: &egui::Context, id: egui::Id, text: &str) {
-    if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
-        let ccursor = egui::text::CCursor::new(text.chars().count());
-        state
-            .cursor
-            .set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
-        state.store(ctx, id);
-    }
-}
+const TTY_TERM_FOCUS_ID: &str = "tty_ama0_native_terminal";
 
 pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
     ui.horizontal_wrapped(|ui| {
@@ -91,6 +95,10 @@ pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
             {
                 app.config.active_terminal_tab = tab_id.to_string();
                 app.config.dock_collapsed = false;
+                if tab_id == "serial" {
+                    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
+                }
                 let _ = app.save_config();
             }
         }
@@ -159,6 +167,8 @@ pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
                             .clicked()
                         {
                             app.send_serial_command(cmd);
+                            let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                            ui.ctx().memory_mut(|m| m.request_focus(term_id));
                             ui.close_menu();
                         }
                     }
@@ -169,6 +179,17 @@ pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
                     .clicked()
                 {
                     app.send_serial_command("\x03");
+                    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
+                }
+                if ui
+                    .add_enabled(vm_running, egui::Button::new("Ctrl+D"))
+                    .on_hover_text("Отправить сигнал конца ввода EOF (0x04) в консоль ttyAMA0")
+                    .clicked()
+                {
+                    app.send_serial_command("\x04");
+                    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
                 }
                 if ui
                     .button("Копировать")
@@ -179,6 +200,8 @@ pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
                         let joined = sess.serial_lines().join("\n");
                         ui.ctx().copy_text(joined);
                     }
+                    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
                 }
                 if ui
                     .button("Очистить")
@@ -188,6 +211,8 @@ pub fn render_bottom_dock(ui: &mut egui::Ui, app: &mut GuiAppState) {
                     if let Some(ref sess) = app.session {
                         sess.clear_serial_lines();
                     }
+                    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
                 }
                 ui.checkbox(&mut app.terminal_autoscroll, "Автопрокрутка");
             } else if app.config.active_terminal_tab == "maind" {
@@ -274,25 +299,242 @@ fn classify_serial_line_color(clean: &str) -> Color32 {
     }
 }
 
+fn build_active_line_job(active_line: &str, cursor_col: usize, has_focus: bool) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    let font_id = FontId::monospace(13.5);
+    let chars: Vec<char> = active_line.chars().collect();
+    let col = cursor_col.min(chars.len());
+    let before: String = chars[..col].iter().collect();
+    let cursor_ch: String = chars
+        .get(col)
+        .copied()
+        .unwrap_or(' ')
+        .to_string();
+    let after: String = if col + 1 < chars.len() {
+        chars[col + 1..].iter().collect()
+    } else {
+        String::new()
+    };
+
+    let text_fmt = |color: Color32| egui::TextFormat {
+        font_id: font_id.clone(),
+        color,
+        ..Default::default()
+    };
+
+    if let Some(hash_idx) = before.find("# ") {
+        let split_at = hash_idx + 2;
+        job.append(
+            &before[..split_at],
+            0.0,
+            text_fmt(Color32::from_rgb(87, 227, 137)),
+        );
+        if split_at < before.len() {
+            job.append(
+                &before[split_at..],
+                0.0,
+                text_fmt(Color32::from_rgb(242, 247, 255)),
+            );
+        }
+    } else {
+        job.append(&before, 0.0, text_fmt(Color32::from_rgb(130, 200, 255)));
+    }
+
+    let cursor_fmt = egui::TextFormat {
+        font_id: font_id.clone(),
+        color: if has_focus {
+            Color32::from_rgb(14, 16, 20)
+        } else {
+            Color32::from_rgb(230, 236, 245)
+        },
+        background: if has_focus {
+            Color32::from_rgb(87, 227, 137)
+        } else {
+            Color32::from_rgb(65, 75, 92)
+        },
+        ..Default::default()
+    };
+    job.append(&cursor_ch, 0.0, cursor_fmt);
+
+    if !after.is_empty() {
+        job.append(&after, 0.0, text_fmt(Color32::from_rgb(242, 247, 255)));
+    }
+
+    job
+}
+
+fn collect_terminal_key_events(ctx: &egui::Context, term_id: egui::Id) -> (String, bool) {
+    ctx.memory_mut(|m| {
+        m.set_focus_lock_filter(
+            term_id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        );
+    });
+
+    let mut tx = String::new();
+    let mut clear_scrollback = false;
+
+    ctx.input_mut(|i| {
+        for ev in &i.events {
+            match ev {
+                egui::Event::Copy => {
+                    // `egui-winit` translates Ctrl+C on Windows/Linux (and Cmd+C on macOS) into
+                    // `Event::Copy` and returns early before pushing `Event::Key { key: Key::C }`.
+                    tx.push('\x03');
+                }
+                egui::Event::Cut => {
+                    tx.push('\x18');
+                }
+                egui::Event::Paste(pasted) => {
+                    let norm = pasted.replace("\r\n", "\n").replace('\r', "\n");
+                    tx.push_str(&norm);
+                }
+                egui::Event::Text(text) | egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                    if !i.modifiers.ctrl && !i.modifiers.command {
+                        for ch in text.chars() {
+                            if ch >= ' ' {
+                                tx.push(ch);
+                            }
+                        }
+                    }
+                }
+                egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    let eff_key = physical_key.unwrap_or(*key);
+                    if modifiers.ctrl || modifiers.command || i.modifiers.ctrl || i.modifiers.command {
+                        match eff_key {
+                            egui::Key::A => tx.push('\x01'),
+                            egui::Key::B => tx.push('\x02'),
+                            egui::Key::C => tx.push('\x03'),
+                            egui::Key::D => tx.push('\x04'),
+                            egui::Key::E => tx.push('\x05'),
+                            egui::Key::F => tx.push('\x06'),
+                            egui::Key::G => tx.push('\x07'),
+                            egui::Key::H => tx.push('\x08'),
+                            egui::Key::J => tx.push('\n'),
+                            egui::Key::K => tx.push('\x0b'),
+                            egui::Key::L => {
+                                clear_scrollback = true;
+                                tx.push('\x0c');
+                            }
+                            egui::Key::N => tx.push('\x0e'),
+                            egui::Key::P => tx.push('\x10'),
+                            egui::Key::Q => tx.push('\x11'),
+                            egui::Key::R => tx.push('\x12'),
+                            egui::Key::S => tx.push('\x13'),
+                            egui::Key::T => tx.push('\x14'),
+                            egui::Key::U => tx.push('\x15'),
+                            egui::Key::W => tx.push('\x17'),
+                            egui::Key::X => tx.push('\x18'),
+                            egui::Key::Y => tx.push('\x19'),
+                            egui::Key::Z => tx.push('\x1a'),
+                            egui::Key::Backslash => tx.push('\x1c'),
+                            egui::Key::CloseBracket => tx.push('\x1d'),
+                            _ => {}
+                        }
+                    } else if !modifiers.alt && !i.modifiers.alt {
+                        match eff_key {
+                            egui::Key::Tab => tx.push('\t'),
+                            egui::Key::Enter => tx.push('\n'),
+                            egui::Key::Backspace => tx.push('\x7f'),
+                            egui::Key::Delete => tx.push_str("\x1b[3~"),
+                            egui::Key::Escape => tx.push('\x1b'),
+                            egui::Key::ArrowUp => tx.push_str("\x1b[A"),
+                            egui::Key::ArrowDown => tx.push_str("\x1b[B"),
+                            egui::Key::ArrowRight => tx.push_str("\x1b[C"),
+                            egui::Key::ArrowLeft => tx.push_str("\x1b[D"),
+                            egui::Key::Home => tx.push('\x01'),
+                            egui::Key::End => tx.push('\x05'),
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        i.events
+            .retain(|ev| !matches!(ev, egui::Event::Copy | egui::Event::Cut));
+
+        for key in [
+            egui::Key::Tab,
+            egui::Key::Enter,
+            egui::Key::Backspace,
+            egui::Key::Delete,
+            egui::Key::Escape,
+            egui::Key::ArrowUp,
+            egui::Key::ArrowDown,
+            egui::Key::ArrowLeft,
+            egui::Key::ArrowRight,
+            egui::Key::Home,
+            egui::Key::End,
+        ] {
+            let _ = i.consume_key(egui::Modifiers::NONE, key);
+        }
+    });
+
+    (tx, clear_scrollback)
+}
+
 fn render_serial_console_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
     let vm_running = app.session.is_some();
-    let board = app
-        .latest_state
-        .as_ref()
-        .map(|s| s.board_slug.clone())
-        .unwrap_or_else(|| app.config.selected_board.clone());
-    let lines = app
+    let snap = app
         .session
         .as_ref()
-        .map(|s| s.serial_lines())
+        .map(|s| s.serial_snapshot())
         .unwrap_or_default();
 
     let scroll_height = ui.available_height().max(60.0);
-    let prompt_id = ui.make_persistent_id("ide_serial_inline_prompt");
+    let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+    let layer_id = ui.layer_id();
 
-    egui::Frame::canvas(ui.style())
+    // Register `term_id` in egui's focus cache every frame so `Focus::end_pass` never drops it.
+    ui.ctx()
+        .memory_mut(|m| m.interested_in_focus(term_id, layer_id));
+
+    // Automatically focus the terminal when the serial tab is open and no other input widget has focus.
+    if ui.ctx().memory(|m| m.focused().is_none()) {
+        ui.ctx().memory_mut(|m| m.request_focus(term_id));
+    }
+
+    let has_focus = ui.ctx().memory(|m| m.has_focus(term_id));
+
+    if has_focus {
+        let (tx, clear_scrollback) = collect_terminal_key_events(ui.ctx(), term_id);
+        if vm_running {
+            if clear_scrollback {
+                if let Some(ref sess) = app.session {
+                    sess.clear_serial_lines();
+                }
+            }
+            if !tx.is_empty() {
+                app.send_serial_raw(&tx);
+                app.terminal_autoscroll = true;
+            }
+        }
+    }
+
+    let stroke_col = if has_focus && vm_running {
+        Color32::from_rgb(70, 145, 110)
+    } else {
+        Color32::from_rgb(45, 52, 64)
+    };
+
+    let mut active_cursor_rect = None;
+
+    let frame_resp = egui::Frame::canvas(ui.style())
         .fill(Color32::from_rgb(14, 16, 20))
-        .stroke(Stroke::new(1.0, Color32::from_rgb(45, 52, 64)))
+        .stroke(Stroke::new(1.0, stroke_col))
         .inner_margin(Margin::symmetric(10.0, 6.0))
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -304,7 +546,7 @@ fn render_serial_console_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
                     ui.set_min_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 2.0;
 
-                    if !vm_running && lines.is_empty() {
+                    if !vm_running && snap.lines.is_empty() && snap.active_line.is_empty() {
                         ui.label(
                             RichText::new(
                                 "Терминал ttyAMA0 не активен (ВМ остановлена). Нажмите «Запустить образ (Старт ВМ)» в верхней панели.",
@@ -313,11 +555,8 @@ fn render_serial_console_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
                             .color(Color32::from_rgb(145, 155, 170)),
                         );
                     } else {
-                        for line in &lines {
+                        for line in &snap.lines {
                             let clean = strip_ansi_and_control_chars(line);
-                            if clean.trim() == "~ #" {
-                                continue;
-                            }
                             let col = classify_serial_line_color(&clean);
                             ui.add(
                                 egui::Label::new(
@@ -328,116 +567,60 @@ fn render_serial_console_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
                                 .selectable(true),
                             );
                         }
+
+                        if vm_running || !snap.active_line.is_empty() {
+                            let job = build_active_line_job(
+                                &snap.active_line,
+                                snap.cursor_col,
+                                has_focus && vm_running,
+                            );
+                            let active_resp = ui.add(
+                                egui::Label::new(job).sense(egui::Sense::hover()),
+                            );
+                            active_cursor_rect = Some(active_resp.rect);
+                        }
                     }
 
-                    ui.add_space(2.0);
-                    let mut prompt_resp = None;
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let cwd_display = if app.serial_cwd.is_empty() {
-                            "/"
-                        } else {
-                            &app.serial_cwd
-                        };
-                        let prompt_prefix = format!("root@{}:{}#", board, cwd_display);
-                        let prefix_col = if vm_running {
-                            Color32::from_rgb(87, 227, 137)
-                        } else {
-                            Color32::from_rgb(120, 130, 145)
-                        };
-                        ui.label(
-                            RichText::new(prompt_prefix)
-                                .font(FontId::monospace(13.5))
-                                .strong()
-                                .color(prefix_col),
-                        );
-
-                        let has_prompt_focus = ui.ctx().memory(|m| m.has_focus(prompt_id));
-                        let mut move_cursor_to_end = false;
-
-                        if has_prompt_focus && vm_running {
-                            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-                            {
-                                app.tab_complete_serial_input();
-                                app.terminal_autoscroll = true;
-                                move_cursor_to_end = true;
-                            }
-                            if ui.input_mut(|i| {
-                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
-                            }) && app.history_up()
-                            {
-                                move_cursor_to_end = true;
-                            }
-                            if ui.input_mut(|i| {
-                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
-                            }) && app.history_down()
-                            {
-                                move_cursor_to_end = true;
-                            }
-                            if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::L))
-                            {
-                                if let Some(ref sess) = app.session {
-                                    sess.clear_serial_lines();
-                                }
-                            }
-                            if app.serial_input.is_empty()
-                                && ui.input_mut(|i| {
-                                    i.consume_key(egui::Modifiers::CTRL, egui::Key::C)
-                                })
-                            {
-                                app.send_serial_command("\x03");
-                            }
-                        }
-
-                        if move_cursor_to_end {
-                            set_text_edit_cursor_to_end(ui.ctx(), prompt_id, &app.serial_input);
-                        }
-
-                        let resp = ui.add_enabled(
-                            vm_running,
-                            egui::TextEdit::singleline(&mut app.serial_input)
-                                .id(prompt_id)
-                                .frame(false)
-                                .lock_focus(true)
-                                .font(FontId::monospace(13.5))
-                                .text_color(Color32::from_rgb(242, 247, 255))
-                                .desired_width(ui.available_width().max(120.0)),
-                        );
-
-                        if app.serial_input.contains('\t') {
-                            app.tab_complete_serial_input();
-                            app.terminal_autoscroll = true;
-                            set_text_edit_cursor_to_end(ui.ctx(), resp.id, &app.serial_input);
-                        } else if move_cursor_to_end {
-                            set_text_edit_cursor_to_end(ui.ctx(), resp.id, &app.serial_input);
-                        }
-
-                        let enter_pressed = (resp.has_focus() || resp.lost_focus())
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if enter_pressed && vm_running {
-                            let cmd = app.serial_input.clone();
-                            app.serial_input.clear();
-                            app.send_serial_command(&cmd);
-                            app.terminal_autoscroll = true;
-                            resp.request_focus();
-                        }
-
-                        prompt_resp = Some(resp);
-                    });
-
-                    // Clicking empty terminal space focuses the inline prompt like in VS Code / JetBrains
                     let rem_h = ui.available_height().max(18.0);
-                    let (_, empty_resp) = ui.allocate_exact_size(
+                    ui.allocate_exact_size(
                         egui::vec2(ui.available_width(), rem_h),
-                        egui::Sense::click(),
+                        egui::Sense::hover(),
                     );
-                    if empty_resp.clicked() {
-                        if let Some(resp) = prompt_resp {
-                            resp.request_focus();
-                        }
-                    }
                 });
         });
+
+    let term_rect = frame_resp.response.rect;
+    ui.ctx()
+        .check_for_id_clash(term_id, term_rect, TTY_TERM_FOCUS_ID);
+    if ui.input(|i| i.pointer.any_pressed()) {
+        if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
+            if term_rect.contains(pos) && !ui.ctx().memory(|m| m.has_focus(term_id)) {
+                ui.ctx().memory_mut(|m| m.request_focus(term_id));
+            }
+        }
+    }
+
+    ui.ctx().memory_mut(|m| {
+        m.set_focus_lock_filter(
+            term_id,
+            egui::EventFilter {
+                tab: true,
+                horizontal_arrows: true,
+                vertical_arrows: true,
+                escape: true,
+            },
+        );
+    });
+
+    if has_focus && vm_running {
+        let cursor_rect = active_cursor_rect.unwrap_or(term_rect);
+        ui.ctx().output_mut(|o| {
+            o.ime = Some(egui::output::IMEOutput {
+                rect: term_rect,
+                cursor_rect,
+            });
+        });
+    }
 }
 
 fn render_maind_log_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
@@ -479,4 +662,128 @@ fn render_maind_log_tab(ui: &mut egui::Ui, app: &mut GuiAppState) {
                     }
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_egui_focus_retention_ascii_and_unicode_events() {
+        let ctx = egui::Context::default();
+        let term_id = egui::Id::new(TTY_TERM_FOCUS_ID);
+
+        // Frame 1: acquire focus
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.ctx()
+                    .memory_mut(|m| m.interested_in_focus(term_id, ui.layer_id()));
+                if ui.ctx().memory(|m| m.focused().is_none()) {
+                    ui.ctx().memory_mut(|m| m.request_focus(term_id));
+                }
+                ui.ctx().check_for_id_clash(term_id, rect, TTY_TERM_FOCUS_ID);
+            });
+        });
+
+        // Frame 2: lock focus filter
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.ctx()
+                    .memory_mut(|m| m.interested_in_focus(term_id, ui.layer_id()));
+                assert!(ui.ctx().memory(|m| m.has_focus(term_id)));
+                let _ = collect_terminal_key_events(ui.ctx(), term_id);
+                ui.ctx().check_for_id_clash(term_id, rect, TTY_TERM_FOCUS_ID);
+            });
+        });
+
+        // Frame 3: send ASCII + Unicode/Cyrillic + Tab + Enter
+        let mut raw = egui::RawInput::default();
+        raw.events.push(egui::Event::Text("echo Привет ".to_string()));
+        raw.events
+            .push(egui::Event::Ime(egui::ImeEvent::Commit("мир".to_string())));
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Tab,
+            physical_key: Some(egui::Key::Tab),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        raw.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: Some(egui::Key::Enter),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+
+        let mut captured = String::new();
+        let _ = ctx.run(raw, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.ctx()
+                    .memory_mut(|m| m.interested_in_focus(term_id, ui.layer_id()));
+                assert!(ui.ctx().memory(|m| m.has_focus(term_id)));
+                let (tx, _) = collect_terminal_key_events(ui.ctx(), term_id);
+                captured = tx;
+                ui.ctx().check_for_id_clash(term_id, rect, TTY_TERM_FOCUS_ID);
+            });
+        });
+        assert_eq!(captured, "echo Привет мир\t\n");
+
+        // Frame 4: verify Tab on Frame 3 did NOT steal focus away from `term_id`
+        let mut raw4 = egui::RawInput::default();
+        raw4.events.push(egui::Event::Key {
+            key: egui::Key::ArrowUp,
+            physical_key: Some(egui::Key::ArrowUp),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let mut captured4 = String::new();
+        let _ = ctx.run(raw4, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.ctx()
+                    .memory_mut(|m| m.interested_in_focus(term_id, ui.layer_id()));
+                assert!(ui.ctx().memory(|m| m.has_focus(term_id)));
+                let (tx, _) = collect_terminal_key_events(ui.ctx(), term_id);
+                captured4 = tx;
+                ui.ctx().check_for_id_clash(term_id, rect, TTY_TERM_FOCUS_ID);
+            });
+        });
+        assert_eq!(captured4, "\x1b[A");
+
+        // Frame 5: verify Ctrl+C (`Event::Copy` from `egui-winit` and `Event::Key::C`) -> \x03
+        // and Ctrl+D (`Event::Key::D`) -> \x04
+        let mut raw5 = egui::RawInput::default();
+        raw5.modifiers.ctrl = true;
+        raw5.modifiers.command = true;
+        raw5.events.push(egui::Event::Copy);
+        raw5.events.push(egui::Event::Key {
+            key: egui::Key::D,
+            physical_key: Some(egui::Key::D),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                command: true,
+                ..Default::default()
+            },
+        });
+        let mut captured5 = String::new();
+        let _ = ctx.run(raw5, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let rect = ui.max_rect();
+                ui.ctx()
+                    .memory_mut(|m| m.interested_in_focus(term_id, ui.layer_id()));
+                assert!(ui.ctx().memory(|m| m.has_focus(term_id)));
+                let (tx, _) = collect_terminal_key_events(ui.ctx(), term_id);
+                captured5 = tx;
+                ui.ctx().check_for_id_clash(term_id, rect, TTY_TERM_FOCUS_ID);
+            });
+        });
+        assert_eq!(captured5, "\x03\x04");
+    }
 }

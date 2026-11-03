@@ -1,6 +1,5 @@
 use crate::adb::AdbClient;
 use crate::image_builder::sanitize_tar_gz_file;
-use protocol::normalize_board_slug;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,50 +26,6 @@ pub struct DumpResult {
     pub info_path: PathBuf,
     pub archive_bytes: u64,
     pub info: DumpInfo,
-}
-
-pub fn detect_board_slug_from_probe(dev_type_cfg: &str, model_raw: &str) -> String {
-    let model_lc = model_raw.to_ascii_lowercase();
-    if model_lc.contains("prune") {
-        return "plumnc".to_string();
-    }
-
-    let dev = dev_type_cfg.trim();
-    if !dev.is_empty() && !dev.eq_ignore_ascii_case("unknown") {
-        return normalize_board_slug(dev);
-    }
-
-    if model_lc.contains("cucumber") {
-        "cucumber".to_string()
-    } else if model_lc.contains("bergamot")
-        || model_lc.contains("yandexmini_3")
-        || model_lc.contains("yandexmini3")
-        || model_lc.contains("mini3")
-    {
-        "bergamot".to_string()
-    } else if model_lc.contains("pickle") {
-        "pickle".to_string()
-    } else if model_lc.contains("orion") {
-        "orion".to_string()
-    } else if model_lc.contains("plum") {
-        "plum".to_string()
-    } else if model_lc.contains("mango") {
-        "mango".to_string()
-    } else if model_lc.contains("saturn") {
-        "saturn".to_string()
-    } else if model_lc.contains("station-midi") {
-        "station2".to_string()
-    } else if model_lc.contains("yandexmini2nc") || model_lc.contains("mini2nc") {
-        "yandexmini2nc".to_string()
-    } else if model_lc.contains("yandexmini_2") || model_lc.contains("mini2") {
-        "yandexmini2".to_string()
-    } else if model_lc.contains("yandexmicro") {
-        "yandexmicro".to_string()
-    } else if model_lc.contains("axg") {
-        "yandexmini".to_string()
-    } else {
-        "unknown".to_string()
-    }
 }
 
 pub fn format_utc_timestamp(time: SystemTime) -> String {
@@ -104,7 +59,7 @@ pub fn format_utc_timestamp(time: SystemTime) -> String {
 
 const PROBE_SCRIPT: &str = r#"
 DEV_TYPE=$(sed -n 's/.*"deviceType"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /system/vendor/quasar/quasar.cfg 2>/dev/null | head -n 1)
-MODEL=$(tr '\0\r\n' '   ' < /proc/device-tree/compatible 2>/dev/null; printf " "; tr '\0\r\n' '   ' < /proc/device-tree/model 2>/dev/null)
+MODEL=$(getprop ro.product.device 2>/dev/null || true; printf " "; getprop ro.product.model 2>/dev/null || true; printf " "; tr '\0\r\n' '   ' < /proc/device-tree/compatible 2>/dev/null; printf " "; tr '\0\r\n' '   ' < /proc/device-tree/amlogic-dt-id 2>/dev/null; printf " "; tr '\0\r\n' '   ' < /proc/device-tree/model 2>/dev/null)
 echo "KUYASE_DEV_TYPE=$DEV_TYPE"
 echo "KUYASE_MODEL=$MODEL"
 echo "KUYASE_PARTITIONS_START"
@@ -177,7 +132,7 @@ pub fn dump_from_adb(
         }
     }
 
-    let board_slug = detect_board_slug_from_probe(&dev_type_cfg, &dt_model);
+    let board_slug = protocol::detect_board_slug_from_probe(&dev_type_cfg, &dt_model);
     let timestamp = format_utc_timestamp(SystemTime::now());
     let out_dir = match out_dir_override {
         Some(dir) => dir.to_path_buf(),
@@ -270,50 +225,9 @@ mod tests {
         read_adb_packet, write_adb_packet, A_CLSE, A_CNXN, A_OKAY, A_OPEN, A_VERSION, A_WRTE,
         MAX_ADB_DATA,
     };
-    use crate::image_builder::{read_tar_gz_into_tree, RootfsTree};
+    use crate::rootfs_tree::{read_tar_gz_into_tree, write_tree_to_tar_gz, RootfsTree};
     use std::net::TcpListener;
     use std::thread;
-
-    #[test]
-    fn test_detect_board_slug_from_probe() {
-        assert_eq!(detect_board_slug_from_probe("mini2", ""), "yandexmini2");
-        assert_eq!(
-            detect_board_slug_from_probe("plum", "yandex,prune-evt2 yandex,prune"),
-            "plumnc"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("plum", "yandex,plum-evt2 yandex,plum"),
-            "plum"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("yandexmidi", "yandex,station-midi"),
-            "station2"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("station3", "yandex,orion"),
-            "orion"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("", "yandex,cucumber-dvt2 amlogic,a5"),
-            "cucumber"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("", "amlogic, axg Amlogic"),
-            "yandexmini"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("lite1", ""),
-            "yandexmicro"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("bergamot", "yandex,bergamot amlogic,axg"),
-            "bergamot"
-        );
-        assert_eq!(
-            detect_board_slug_from_probe("", "yandex,bergamot amlogic,axg"),
-            "bergamot"
-        );
-    }
 
     #[test]
     fn test_dump_from_adb_against_mock_speaker() {
@@ -340,7 +254,7 @@ mod tests {
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
         let mock_tar_path = temp_dir.join("device_scratch.tar.gz");
-        crate::image_builder::write_tree_to_tar_gz(&raw_tree, &mock_tar_path).unwrap();
+        write_tree_to_tar_gz(&raw_tree, &mock_tar_path).unwrap();
         let mock_tar_bytes = fs::read(&mock_tar_path).unwrap();
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

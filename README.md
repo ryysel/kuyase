@@ -152,6 +152,7 @@ kuyase test --board yandexmini
 | `yandexmicro` | Станция Лайт (`YNDX-00025`) | 32-bit `armhf` | 3-LED кольцо `micro:*:ring1..3`, 4 микрофона |
 | `plum` | Станция Лайт 2 с часами (`yandex,plum`) | 32-bit `armhf` | 3-LED кольцо `plum:*:ring1..3`, 7-сегментные часы `plum:white:clock*`, датчик света `LTR-308` (`ALS`), 2 микрофона |
 | `plumnc` | Станция Лайт 2 без часов (`yandex,prune`) | 32-bit `armhf` | 3-LED кольцо `plum:*:ring1..3`, датчик света `LTR-308` (`ALS`), 2 микрофона |
+| `mango` | Станция Стрит (`yandex,mango`) | 32-bit `armhf` | 4-LED индикатор заряда (`/dev/fb0` + `mango:*:ring1..4`, `AW9110`), 3-LED RGBW логотип `oknix` (`/dev/fb1` + `mango:*:logo0..2`, `AW21012`), усилитель `ACM8625S` (`2-002c`), кулонометр батареи `CW2217` и контроллер зарядки `IP2366` (`PD`), акселерометр `SC7A20TR`, 2 микрофона |
 | `station2` | Станция 2 (`YNDX-00051` / `yandex,station-midi`) | 32-bit `armhf` | 88-LED RGBW панель (`/dev/fb0` + `station2:*:ring0..87`), датчик света `LTR-308` (`ALS`), 4 микрофона |
 | `cucumber` | Станция Миди (`YNDX-00054`) | 64-bit `aarch64` | 24-LED кольцо (`/dev/fb0`), 6-LED логотип (`/dev/fb1`), 7-сегментные часы `cucumber:white:clock-*`, датчик света `LTR-308` (`ALS`), 4 микрофона |
 | `orion` | Станция 3 (`YNDX-00055`) | 64-bit `aarch64` | 36-LED кольцо (`/dev/fb2`), 12×2 RGBW эмбиент (`/dev/fb0`), монохромный LED-экран `21×12` (`/dev/fb1`, `gowin_led_device`), 4× усилителя `ACM8625S` (`2-002c`, `3-002c..2e`), ультразвук TDM (`hw:0,0`, `96 кГц` / `38.4 кГц`), датчик света `LTR-308` (`ALS`), 6 микрофонов |
@@ -163,7 +164,6 @@ kuyase test --board yandexmini
 | Код | Модель | Userspace | Устройства |
 | :--- | :--- | :--- | :--- |
 | `pickle` | Станция Мини 3 Про | 64-bit `aarch64` | 16-LED кольцо, 6-LED логотип, 36-сегментные часы, датчик света `LTR-308` (`ALS`), 4 микрофона |
-| `mango` | Станция Стрит | 32-bit `armhf` | 3-LED логотип RGBW, 4-LED индикатор заряда |
 | `saturn` | Умный хаб Яндекса | 32-bit `armhf` | 1 RGB-светодиод статуса (без аудио и микрофонов) |
 
 >[!warning]

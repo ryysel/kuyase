@@ -1,8 +1,11 @@
+pub use crate::serial_vt100::{
+    strip_ansi_and_control_chars, SerialScreenBuffer, SerialSnapshot,
+};
+use crate::serial_vt100::{spawn_stderr_serial_reader, spawn_stdout_serial_reader};
 use protocol::normalize_board_slug;
-use std::collections::VecDeque;
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -10,6 +13,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 pub const EMBEDDED_HW_BRIDGE: &[u8] = include_bytes!("../../guest-init/bin/qemu-hw-bridge");
+
+pub fn bridge_connect_timeout() -> Duration {
+    let secs = env::var("KUYASE_BOOT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(180);
+    Duration::from_secs(secs)
+}
 
 pub fn resolve_repo_root() -> PathBuf {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -345,77 +357,8 @@ pub struct EmulatorSession {
     pub kernel_img: PathBuf,
     pub bridge_bin: PathBuf,
     child: Option<Child>,
-    serial_stdin: Mutex<Option<ChildStdin>>,
-    serial_lines: Arc<Mutex<VecDeque<String>>>,
-}
-
-pub fn strip_ansi_and_control_chars(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek().copied() {
-                Some('[') => {
-                    chars.next();
-                    while let Some(c) = chars.next() {
-                        if ('@'..='~').contains(&c) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    chars.next();
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' {
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {
-                    chars.next();
-                }
-                None => {}
-            }
-            continue;
-        }
-        if ch == '\t' || ch >= ' ' {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn spawn_serial_reader<R: std::io::Read + Send + 'static>(
-    stream: R,
-    lines_ref: Arc<Mutex<VecDeque<String>>>,
-    log_path: PathBuf,
-    log_prefix: &'static str,
-    line_prefix: &'static str,
-) {
-    thread::spawn(move || {
-        let reader = BufReader::new(stream);
-        let mut log_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_path)
-            .ok();
-        for line in reader.lines().map_while(Result::ok) {
-            let clean = strip_ansi_and_control_chars(line.trim_end_matches('\r'));
-            if let Some(ref mut f) = log_file {
-                let _ = writeln!(f, "{}{}", log_prefix, clean);
-            }
-            let mut guard = lines_ref.lock().unwrap();
-            if guard.len() >= 2000 {
-                guard.pop_front();
-            }
-            let formatted = if line_prefix.is_empty() {
-                clean
-            } else {
-                format!("{}{}", line_prefix, clean)
-            };
-            guard.push_back(formatted);
-        }
-    });
+    serial_stdin: Arc<Mutex<Option<ChildStdin>>>,
+    serial_screen: Arc<Mutex<SerialScreenBuffer>>,
 }
 
 impl EmulatorSession {
@@ -510,13 +453,16 @@ impl EmulatorSession {
 
         // TCG bench: the guest needs real parallelism (Luna + plugin + audio).
         // 4 vCPUs on the 8-thread host is the sweet spot; override if needed.
-        let smp = std::env::var("KUYASE_SMP").unwrap_or_else(|_| {
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(2)
-                .clamp(2, 4)
-                .to_string()
-        });
+        let host_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .max(1);
+        let smp = std::env::var("KUYASE_SMP")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .map(|n| n.clamp(1, host_threads))
+            .unwrap_or_else(|| host_threads.clamp(2, 4))
+            .to_string();
         let mem = std::env::var("KUYASE_MEM").unwrap_or_else(|_| "1G".to_string());
         let mut cmd = Command::new(&qemu_bin);
         cmd.args([
@@ -606,23 +552,23 @@ impl EmulatorSession {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let serial_lines = Arc::new(Mutex::new(VecDeque::with_capacity(2048)));
+        let serial_stdin = Arc::new(Mutex::new(stdin));
+        let serial_screen = Arc::new(Mutex::new(SerialScreenBuffer::with_capacity(2048)));
         if let Some(warn) = lan_warning {
-            serial_lines.lock().unwrap().push_back(warn);
+            serial_screen.lock().unwrap().push_completed_line(warn);
         }
 
         if let Some(out) = stdout {
-            spawn_serial_reader(out, serial_lines.clone(), serial_log_path.clone(), "", "");
+            spawn_stdout_serial_reader(
+                out,
+                serial_screen.clone(),
+                serial_stdin.clone(),
+                serial_log_path.clone(),
+            );
         }
 
         if let Some(err) = stderr {
-            spawn_serial_reader(
-                err,
-                serial_lines.clone(),
-                serial_log_path,
-                "[stderr] ",
-                "[qemu] ",
-            );
+            spawn_stderr_serial_reader(err, serial_screen.clone(), serial_log_path);
         }
 
         Ok(Self {
@@ -631,8 +577,8 @@ impl EmulatorSession {
             kernel_img,
             bridge_bin,
             child: Some(child),
-            serial_stdin: Mutex::new(stdin),
-            serial_lines,
+            serial_stdin,
+            serial_screen,
         })
     }
 
@@ -642,14 +588,30 @@ impl EmulatorSession {
             return Err("serial stdin is closed".to_string());
         };
         // ARM PL011 UART (ttyAMA0) has a 16/32-byte hardware RX FIFO.
-        // Pace writes in 12-byte chunks so long one-liners never overflow the UART FIFO.
-        let bytes = input.as_bytes();
-        for (i, chunk) in bytes.chunks(12).enumerate() {
-            if i > 0 {
+        // Pace writes in <=12-byte chunks aligned to UTF-8 char boundaries
+        // so multi-byte Unicode characters are never split across writes.
+        let mut chunk = String::with_capacity(16);
+        let mut chunk_idx = 0usize;
+        for ch in input.chars() {
+            if !chunk.is_empty() && chunk.len() + ch.len_utf8() > 12 {
+                if chunk_idx > 0 {
+                    thread::sleep(Duration::from_millis(4));
+                }
+                stdin
+                    .write_all(chunk.as_bytes())
+                    .and_then(|_| stdin.flush())
+                    .map_err(|e| format!("failed to write to serial stdin: {}", e))?;
+                chunk.clear();
+                chunk_idx += 1;
+            }
+            chunk.push(ch);
+        }
+        if !chunk.is_empty() {
+            if chunk_idx > 0 {
                 thread::sleep(Duration::from_millis(4));
             }
             stdin
-                .write_all(chunk)
+                .write_all(chunk.as_bytes())
                 .and_then(|_| stdin.flush())
                 .map_err(|e| format!("failed to write to serial stdin: {}", e))?;
         }
@@ -657,19 +619,15 @@ impl EmulatorSession {
     }
 
     pub fn clear_serial_lines(&self) {
-        self.serial_lines.lock().unwrap().clear();
-    }
-
-    pub fn push_serial_line(&self, line: impl Into<String>) {
-        let mut guard = self.serial_lines.lock().unwrap();
-        if guard.len() >= 2000 {
-            guard.pop_front();
-        }
-        guard.push_back(line.into());
+        self.serial_screen.lock().unwrap().clear_scrollback();
     }
 
     pub fn serial_lines(&self) -> Vec<String> {
-        self.serial_lines.lock().unwrap().iter().cloned().collect()
+        self.serial_screen.lock().unwrap().all_lines()
+    }
+
+    pub fn serial_snapshot(&self) -> SerialSnapshot {
+        self.serial_screen.lock().unwrap().snapshot()
     }
 
     pub fn is_running(&mut self) -> bool {

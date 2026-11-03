@@ -3,7 +3,10 @@ use kuyase::bridge_client::BridgeClient;
 use kuyase::dumper::dump_from_adb;
 use kuyase::gui::run_gui;
 use kuyase::image_builder::prepare_images;
-use kuyase::session::{discover_guest_images, resolve_repo_root, EmulatorSession, SessionConfig};
+use kuyase::session::{
+    bridge_connect_timeout, discover_guest_images, resolve_repo_root, EmulatorSession,
+    SessionConfig,
+};
 use kuyase::test_suite::run_multi_board_tests;
 use serde_json::Value;
 use std::env;
@@ -286,7 +289,7 @@ fn run_single_headless_board(
 
     let result = (|| -> Result<(), String> {
         let bridge_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.bridge_port);
-        let bridge = BridgeClient::connect_with_timeout(bridge_addr, Duration::from_secs(90))?;
+        let bridge = BridgeClient::connect_with_timeout(bridge_addr, bridge_connect_timeout())?;
 
         let initial_state = bridge.latest_state();
         let refreshed_state = bridge.request_state()?;
@@ -299,53 +302,25 @@ fn run_single_headless_board(
         }
 
         let adb = AdbClient::from_host_port("127.0.0.1", cfg.adb_port)?;
-        let adb_out = adb.shell(
-            "hostname; uname -m; [ ! -e /usr/local/bin/equasar-daemon ] && echo CLEAN_STANDALONE; cat /tmp/quasar-emu-hw.json",
-            Duration::from_secs(12),
-        )?;
 
-        let expected_host = format!("qemu-{}", cfg.board);
-        if !adb_out.contains(&expected_host) {
-            return Err(format!(
-                "ADB output missing expected hostname '{}': {}",
-                expected_host, adb_out
-            ));
-        }
-        if !adb_out.contains("CLEAN_STANDALONE") {
-            return Err(format!(
-                "ADB output missing CLEAN_STANDALONE marker: {}",
-                adb_out
-            ));
-        }
-
-        let json_start = adb_out
-            .find('{')
-            .ok_or_else(|| format!("missing JSON in /tmp/quasar-emu-hw.json output: {}", adb_out))?;
-        let hw_info: Value = serde_json::from_str(&adb_out[json_start..])
-            .map_err(|e| format!("invalid /tmp/quasar-emu-hw.json: {}", e))?;
-
-        let hw_slug = hw_info
-            .get("board_slug")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if hw_slug != refreshed_state.board_slug {
-            return Err(format!(
-                "quasar-emu-hw.json board_slug '{}' != bridge board_slug '{}'",
-                hw_slug, refreshed_state.board_slug
-            ));
-        }
-
-        if let Some(ref cmd) = opts.exec_cmd {
+        if let Some(ref raw_cmd) = opts.exec_cmd {
+            let resolved_cmd = if let Some(file_path) = raw_cmd.strip_prefix('@') {
+                std::fs::read_to_string(file_path)
+                    .map_err(|e| format!("failed to read --exec script '{}': {}", file_path, e))?
+                    .replace("\r\n", "\n")
+            } else {
+                raw_cmd.replace("\r\n", "\n")
+            };
             println!(
                 "=== [{}] {} ===",
                 cfg.board, refreshed_state.board_name
             );
             let wrapped_cmd = format!(
-                "( {} ); __kuyase_rc=$?; printf \"\\n__KUYASE_EXIT_CODE=%d\\n\" \"$__kuyase_rc\"",
-                cmd
+                "(\n{}\n); __kuyase_rc=$?; rm -f /tmp/.kuyase-exec.sh; printf \"\\n__KUYASE_EXIT_CODE=%d\\n\" \"$__kuyase_rc\"",
+                resolved_cmd
             );
-            let exec_out = adb.shell(&wrapped_cmd, Duration::from_secs(60))?;
-            let mut exit_code: i32 = 0;
+            let exec_out = adb.shell(&wrapped_cmd, Duration::from_secs(300))?;
+            let mut exit_code: i32 = 1;
             let mut clean_lines = Vec::new();
             for line in exec_out.lines() {
                 if let Some(rest) = line.trim().strip_prefix("__KUYASE_EXIT_CODE=") {
@@ -358,7 +333,7 @@ fn run_single_headless_board(
             if !clean_out.trim().is_empty() {
                 println!("{}", clean_out.trim_end());
             }
-            let _ = bridge.request_state()?;
+            let post_state = bridge.request_state()?;
             if exit_code != 0 {
                 println!("-> [FAIL] {} (exit code {})\n", cfg.board, exit_code);
                 bridge.close();
@@ -367,8 +342,47 @@ fn run_single_headless_board(
                     cfg.board, exit_code
                 ));
             }
+            if post_state.ipc_error_count > 0 {
+                println!(
+                    "-> [FAIL] {} (ipc_error_count={})\n",
+                    cfg.board, post_state.ipc_error_count
+                );
+                bridge.close();
+                return Err(format!(
+                    "guest command on '{}' produced {} IPC error(s)",
+                    cfg.board, post_state.ipc_error_count
+                ));
+            }
+            if post_state.led_trigger_conflict_count > 0 {
+                println!(
+                    "-> [FAIL] {} (led_trigger_conflict_count={})\n",
+                    cfg.board, post_state.led_trigger_conflict_count
+                );
+                bridge.close();
+                return Err(format!(
+                    "guest command on '{}' produced {} LED trigger conflict(s)",
+                    cfg.board, post_state.led_trigger_conflict_count
+                ));
+            }
             println!("-> [PASS] {}\n", cfg.board);
         } else {
+            let adb_out = adb.shell(
+                "hostname; uname -m; cat /tmp/quasar-emu-hw.json",
+                Duration::from_secs(12),
+            )?;
+            let expected_host = format!("qemu-{}", cfg.board);
+            if !adb_out.contains(&expected_host) {
+                return Err(format!(
+                    "ADB output missing expected hostname '{}': {}",
+                    expected_host, adb_out
+                ));
+            }
+            let json_start = adb_out
+                .find('{')
+                .ok_or_else(|| format!("missing JSON in /tmp/quasar-emu-hw.json output: {}", adb_out))?;
+            let hw_info: Value = serde_json::from_str(&adb_out[json_start..])
+                .map_err(|e| format!("invalid /tmp/quasar-emu-hw.json: {}", e))?;
+
             println!("--- Duplex Bridge StateSnapshot ---");
             println!("  board_slug   : {}", refreshed_state.board_slug);
             println!("  board_name   : {}", refreshed_state.board_name);

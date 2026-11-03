@@ -162,18 +162,19 @@ pub fn write_ext2_image(
     // 3. Calculate required size and layout
     let payload_blocks: usize = specs
         .values()
-        .map(|s| (s.data.len() + BLOCK_SIZE - 1) / BLOCK_SIZE + 2)
+        .map(|s| s.data.len().div_ceil(BLOCK_SIZE) + 2)
         .sum();
     let min_blocks = (payload_blocks + 2048).max(4096);
     let req_blocks = (requested_size_bytes as usize) / BLOCK_SIZE;
     let total_blocks = req_blocks.max(min_blocks) as u32;
-    let num_groups = (total_blocks + BLOCKS_PER_GROUP - 1) / BLOCKS_PER_GROUP;
-    let total_inodes = ((next_ino + 128).max(num_groups * INODES_PER_GROUP) + num_groups - 1)
-        / num_groups
+    let num_groups = total_blocks.div_ceil(BLOCKS_PER_GROUP);
+    let total_inodes = (next_ino + 128)
+        .max(num_groups * INODES_PER_GROUP)
+        .div_ceil(num_groups)
         * num_groups;
     let inodes_per_group = total_inodes / num_groups;
-    let inode_table_blocks = (inodes_per_group as usize * INODE_SIZE + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    let gdt_blocks = ((num_groups as usize * 32) + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    let inode_table_blocks = (inodes_per_group as usize * INODE_SIZE).div_ceil(BLOCK_SIZE);
+    let gdt_blocks = (num_groups as usize * 32).div_ceil(BLOCK_SIZE);
 
     // Group 0 metadata: block 0 (superblock), blocks 1..1+gdt_blocks (GDT), block BBM, block IBM, inode table
     let mut bbm_blk = vec![0u32; num_groups as usize];
@@ -439,8 +440,8 @@ pub fn read_ext2_image(path: &Path) -> Result<RootfsTree, String> {
     };
     let gdt_offset = if blk_size == 1024 { 2048u64 } else { blk_size as u64 };
 
-    let read_inode =
-        |file: &mut File, ino: u32| -> Result<(u16, u16, u16, u32, u32, [u8; 60]), String> {
+    type RawInodeInfo = (u16, u16, u16, u32, u32, [u8; 60]);
+    let read_inode = |file: &mut File, ino: u32| -> Result<RawInodeInfo, String> {
             let g = (ino - 1) / inodes_per_group;
             let idx = (ino - 1) % inodes_per_group;
             let mut gd = vec![0u8; desc_size];
@@ -561,7 +562,7 @@ pub fn read_ext2_image(path: &Path) -> Result<RootfsTree, String> {
                 i_block[i * 4 + 3],
             ]);
         }
-        let needed_blks = (size as usize + blk_size - 1) / blk_size;
+        let needed_blks = (size as usize).div_ceil(blk_size);
         let mut blk_nums = Vec::with_capacity(needed_blks);
         for &b in ptrs.iter().take(12) {
             if blk_nums.len() < needed_blks && b != 0 {

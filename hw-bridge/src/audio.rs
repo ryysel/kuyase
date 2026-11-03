@@ -145,6 +145,7 @@ pub fn spawn_alsa_loopback_capture(state: Arc<BridgeState>) {
                 "-C", "-D", "hw:0,1,0", "-q", "-t", "raw", "-f", "S16_LE", "-r", "48000", "-c",
                 "2", "-",
             ])
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()

@@ -10,6 +10,11 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const MAIND_LOG_PATH: &str = "/tmp/daemons_logs/maind.log";
+pub const VOLUME_FILES: [&str; 3] = [
+    "/bkupgrade/data/quasar/last_vendor_volume",
+    "/data/quasar/data/last_vendor_volume",
+    "/data/quasar/last_vendor_volume",
+];
 
 pub fn now_millis() -> u64 {
     SystemTime::now()
@@ -93,6 +98,11 @@ impl BoardProfile {
                 || Path::new("/lib/firmware/bergamot-acm8625.cfg").exists()
             {
                 "bergamot".to_string()
+            } else if Path::new("/sys/class/leds/mango:red:ring0").exists()
+                || Path::new("/sys/class/leds/mango:red:ring1").exists()
+                || Path::new("/lib/firmware/mango-acm8625.cfg").exists()
+            {
+                "mango".to_string()
             } else if Path::new("/sys/class/leds/mini2:red:ring0").exists()
                 || Path::new("/sys/class/leds/mini2:red:ring1").exists()
                 || Path::new("/etc/init.d/S61leds_brightness").exists()
@@ -112,158 +122,49 @@ impl BoardProfile {
         });
 
         let (board_slug, board_name, sysfs_prefix, ring_leds, logo_leds, ambilight_leds, has_clock) =
-            match raw_slug.as_str() {
-                "cucumber" => (
-                    "cucumber".to_string(),
-                    "Яндекс Станция Миди (YNDX-00054 / cucumber)".to_string(),
-                    "cucumber".to_string(),
-                    24,
-                    6,
-                    0,
-                    true,
-                ),
-                "orion" => (
-                    "orion".to_string(),
-                    "Яндекс Станция 3 (YNDX-00055 / orion)".to_string(),
-                    "orion".to_string(),
-                    36,
-                    0,
-                    12,
-                    false,
-                ),
-                "yandexmini2" => (
-                    "yandexmini2".to_string(),
-                    "Яндекс Станция Мини 2 с часами (YNDX-00021 / yandexmini2)".to_string(),
-                    "mini2".to_string(),
-                    6,
-                    0,
-                    0,
-                    true,
-                ),
-                "yandexmini2nc" => (
-                    "yandexmini2nc".to_string(),
-                    "Яндекс Станция Мини 2 без часов (YNDX-00020 / yandexmini2nc)".to_string(),
-                    "mini2".to_string(),
-                    6,
-                    0,
-                    0,
-                    false,
-                ),
-                "bergamot" => (
-                    "bergamot".to_string(),
-                    "Яндекс Станция Мини 3 (YNDX-00027 / bergamot)".to_string(),
-                    "bergamot".to_string(),
-                    6,
-                    0,
-                    0,
-                    true,
-                ),
-                "pickle" => (
-                    "pickle".to_string(),
-                    "Яндекс Станция Мини 3 Про (pickle)".to_string(),
-                    "pickle".to_string(),
-                    16,
-                    6,
-                    0,
-                    true,
-                ),
-                "plum" => (
-                    "plum".to_string(),
-                    "Яндекс Станция Лайт 2 Plum (3 LED + часы)".to_string(),
-                    "plum".to_string(),
-                    3,
-                    0,
-                    0,
-                    true,
-                ),
-                "plumnc" => (
-                    "plumnc".to_string(),
-                    "Яндекс Станция Лайт 2 Prune (3 LED, без часов)".to_string(),
-                    "plum".to_string(),
-                    3,
-                    0,
-                    0,
-                    false,
-                ),
-                "yandexmicro" => (
-                    "yandexmicro".to_string(),
-                    "Яндекс Станция Лайт 1 (YNDX-00025 / yandexmicro)".to_string(),
-                    "micro".to_string(),
-                    3,
-                    0,
-                    0,
-                    false,
-                ),
-                "station2" => (
-                    "station2".to_string(),
-                    "Яндекс Станция 2 (YNDX-00051 / station-midi)".to_string(),
-                    "station2".to_string(),
-                    88,
-                    0,
-                    0,
-                    false,
-                ),
-                "mango" => (
-                    "mango".to_string(),
-                    "Яндекс Станция Стрит (mango)".to_string(),
-                    "mango".to_string(),
-                    4,
-                    3,
-                    0,
-                    false,
-                ),
-                "saturn" => (
-                    "saturn".to_string(),
-                    "Умный хаб Яндекса (YNDX-00050 / saturn)".to_string(),
-                    "saturn".to_string(),
-                    1,
-                    0,
-                    0,
-                    false,
-                ),
-                "yandexmini" => (
-                    "yandexmini".to_string(),
-                    "Яндекс Станция Мини 1 (YNDX-0004 / yandexmini)".to_string(),
-                    "yandexmini".to_string(),
+            if let Some(desc) = protocol::find_board_descriptor(&raw_slug) {
+                (
+                    desc.slug.to_string(),
+                    desc.board_name.to_string(),
+                    desc.sysfs_prefix.to_string(),
+                    desc.ring_leds,
+                    desc.logo_leds,
+                    desc.ambilight_leds,
+                    desc.has_clock,
+                )
+            } else if let Some(v) = fs::read_to_string("/tmp/quasar-emu-hw.json")
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            {
+                let other = raw_slug.as_str();
+                (
+                    other.to_string(),
+                    v.get("board_name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(other)
+                        .to_string(),
+                    v.get("sysfs_prefix")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or(other)
+                        .to_string(),
+                    v.get("ring_leds").and_then(|x| x.as_u64()).unwrap_or(6) as usize,
+                    v.get("logo_leds").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
+                    v.get("ambilight_leds")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0) as usize,
+                    v.get("has_clock").and_then(|x| x.as_bool()).unwrap_or(false),
+                )
+            } else {
+                let other = raw_slug.as_str();
+                (
+                    other.to_string(),
+                    format!("Quasar Speaker ({})", other),
+                    other.to_string(),
                     6,
                     0,
                     0,
                     false,
-                ),
-                other => {
-                    if let Some(v) = fs::read_to_string("/tmp/quasar-emu-hw.json")
-                        .ok()
-                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                    {
-                        (
-                            other.to_string(),
-                            v.get("board_name")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or(other)
-                                .to_string(),
-                            v.get("sysfs_prefix")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or(other)
-                                .to_string(),
-                            v.get("ring_leds").and_then(|x| x.as_u64()).unwrap_or(6) as usize,
-                            v.get("logo_leds").and_then(|x| x.as_u64()).unwrap_or(0) as usize,
-                            v.get("ambilight_leds")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0) as usize,
-                            v.get("has_clock").and_then(|x| x.as_bool()).unwrap_or(false),
-                        )
-                    } else {
-                        (
-                            other.to_string(),
-                            format!("Quasar Speaker ({})", other),
-                            other.to_string(),
-                            6,
-                            0,
-                            0,
-                            false,
-                        )
-                    }
-                }
+                )
             };
 
         Self {
@@ -397,8 +298,15 @@ impl BridgeState {
             .audio_hw
             .on_volume_or_mute_changed(clamped, self.mics_muted.load(Ordering::Relaxed));
         let raw_vol = clamped * 1000;
+        let vendor_vol = (clamped * 2).to_string();
         let _ = fs::create_dir_all("/bkupgrade/data/quasar");
-        let _ = fs::write("/bkupgrade/data/quasar/last_vendor_volume", raw_vol.to_string());
+        for path in VOLUME_FILES {
+            if let Some(parent) = Path::new(path).parent() {
+                if parent.is_dir() {
+                    let _ = fs::write(path, &vendor_vol);
+                }
+            }
+        }
         self.append_maind_log(&format!("[sdk] onVolumeChanged: volume={}", clamped));
         self.log(format!(
             "Volume changed -> {}/10 (master_volume={}, LED volume.led arc active)",
@@ -430,45 +338,41 @@ impl BridgeState {
 }
 
 /// Mirror the vendor volume that Quasar (or the emulator's Go stand-in)
-/// writes to `last_vendor_volume` into the twin state.
+/// writes to `last_vendor_volume` into the Hardware Bridge state.
 ///
-/// The GUI used to learn the volume only from host-injected commands, so a
-/// phone slider or the station buttons moved ALSA but left "Громк N/10"
-/// frozen. set_volume_level() also paints the volume arc on the ring, which
-/// is what the real Quasar does on a volume change.
+/// The Virtual Speaker Twin used to learn the volume only from host-injected
+/// commands, so a phone slider or the station buttons moved ALSA but left
+/// "Громк N/10" frozen. `set_volume_level()` also paints the volume arc on the
+/// LED Ring, which is what the real Quasar does on a volume change.
 pub fn spawn_volume_file_watcher(state: std::sync::Arc<BridgeState>) {
     std::thread::spawn(move || {
-        const FILES: [&str; 3] = [
-            "/bkupgrade/data/quasar/last_vendor_volume",
-            "/data/quasar/data/last_vendor_volume",
-            "/data/quasar/last_vendor_volume",
-        ];
-        let mut last_raw: Option<u32> = None;
+        let mut last_seen: [Option<(u32, SystemTime)>; 3] = [None; 3];
         loop {
-            let mut newest: Option<(u32, SystemTime)> = None;
-            for path in FILES {
+            let mut changed: Option<(u32, SystemTime)> = None;
+            for (idx, path) in VOLUME_FILES.iter().enumerate() {
                 let Ok(meta) = fs::metadata(path) else { continue };
                 let Ok(raw) = fs::read_to_string(path) else { continue };
                 let Ok(value) = raw.trim().parse::<u32>() else { continue };
                 let mtime = meta.modified().unwrap_or(UNIX_EPOCH);
-                if newest.map(|(_, t)| mtime > t).unwrap_or(true) {
-                    newest = Some((value, mtime));
+                let cur = (value, mtime);
+                if last_seen[idx] != Some(cur) {
+                    last_seen[idx] = Some(cur);
+                    if changed.map(|(_, t)| mtime >= t).unwrap_or(true) {
+                        changed = Some(cur);
+                    }
                 }
             }
-            if let Some((raw, _)) = newest {
-                if last_raw != Some(raw) {
-                    last_raw = Some(raw);
-                    // Quasar stores last_vendor_volume as percent/5 (0..20);
-                    // some paths use percent; the twin writes master_volume
-                    // (level * 1000). The GUI slider is the 0..10 station level.
-                    let level = match raw {
-                        0..=20 => (raw + 1) / 2,
-                        21..=100 => (raw + 5) / 10,
-                        _ => raw / 1000,
-                    };
-                    if level != state.volume_level.load(Ordering::Relaxed) {
-                        state.set_volume_level(level);
-                    }
+            if let Some((raw, _)) = changed {
+                // Quasar and Hardware Bridge store last_vendor_volume as
+                // percent/5 (0..20); fallback branches cover raw percent
+                // (21..100) and legacy master_volume (level * 1000).
+                let level = match raw {
+                    0..=20 => raw.div_ceil(2),
+                    21..=100 => (raw + 5) / 10,
+                    _ => (raw / 1000).min(10),
+                };
+                if level != state.volume_level.load(Ordering::Relaxed) {
+                    state.set_volume_level(level);
                 }
             }
             std::thread::sleep(Duration::from_millis(400));

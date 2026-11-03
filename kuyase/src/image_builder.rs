@@ -1,269 +1,21 @@
 use crate::archive_formats::{extract_payload_bytes_into_tree, extract_ubi_into_tree, UBI_EC_MAGIC};
 use crate::ext_fs::write_ext2_image;
+pub use crate::rootfs_tree::{
+    normalize_rel_path, read_tar_from_reader, read_tar_gz_into_tree, write_tree_to_tar_gz,
+    RootfsNode, RootfsNodeKind, RootfsTree,
+};
 use crate::session::{resolve_bridge_binary, EMBEDDED_HW_BRIDGE};
 use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use protocol::normalize_board_slug;
-use std::collections::BTreeMap;
+pub use protocol::{
+    detect_board_hint_from_filename, detect_board_hint_from_path, normalize_board_slug,
+};
 use std::fs::{self, File};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use tar::{Archive, Builder, EntryType, Header};
 
 pub const EMBEDDED_INIT_SH: &[u8] = include_bytes!("../../guest-init/equasar-qemu-init.sh");
 pub const EMBEDDED_S99_YAM: &[u8] = include_bytes!("../../guest-init/S99kuyase-yam");
-pub const EMBEDDED_DBUS_BENCH_CONFIG: &[u8] =
-    include_bytes!("../../guest-init/zz-kuyase-bench.conf");
 pub const DEFAULT_DATA_IMAGE_SIZE_BYTES: u64 = 512 * 1024 * 1024;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RootfsNodeKind {
-    Dir,
-    File(Vec<u8>),
-    Symlink(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RootfsNode {
-    pub kind: RootfsNodeKind,
-    pub mode: u16,
-    pub uid: u16,
-    pub gid: u16,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RootfsTree {
-    pub entries: BTreeMap<String, RootfsNode>,
-}
-
-pub fn normalize_rel_path(raw: &str) -> Option<String> {
-    let replaced = raw.replace('\\', "/");
-    let mut parts = Vec::new();
-    for seg in replaced.split('/') {
-        match seg {
-            "" | "." => continue,
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("/"))
-    }
-}
-
-impl RootfsTree {
-    pub fn insert_dir(&mut self, path: &str, mode: u16) {
-        self.insert_dir_with_owner(path, mode, 0, 0);
-    }
-
-    pub fn insert_dir_with_owner(&mut self, path: &str, mode: u16, uid: u16, gid: u16) {
-        if let Some(norm) = normalize_rel_path(path) {
-            self.entries.insert(
-                norm,
-                RootfsNode {
-                    kind: RootfsNodeKind::Dir,
-                    mode: if mode == 0 { 0o755 } else { mode & 0o7777 },
-                    uid,
-                    gid,
-                },
-            );
-        }
-    }
-
-    pub fn insert_file(&mut self, path: &str, data: Vec<u8>, mode: u16) {
-        self.insert_file_with_owner(path, data, mode, 0, 0);
-    }
-
-    pub fn insert_file_with_owner(
-        &mut self,
-        path: &str,
-        data: Vec<u8>,
-        mode: u16,
-        uid: u16,
-        gid: u16,
-    ) {
-        if let Some(norm) = normalize_rel_path(path) {
-            self.entries.insert(
-                norm,
-                RootfsNode {
-                    kind: RootfsNodeKind::File(data),
-                    mode: if mode == 0 { 0o644 } else { mode & 0o7777 },
-                    uid,
-                    gid,
-                },
-            );
-        }
-    }
-
-    pub fn insert_symlink(&mut self, path: &str, target: String) {
-        self.insert_symlink_with_owner(path, target, 0, 0);
-    }
-
-    pub fn insert_symlink_with_owner(&mut self, path: &str, target: String, uid: u16, gid: u16) {
-        if let Some(norm) = normalize_rel_path(path) {
-            self.entries.insert(
-                norm,
-                RootfsNode {
-                    kind: RootfsNodeKind::Symlink(target),
-                    mode: 0o777,
-                    uid,
-                    gid,
-                },
-            );
-        }
-    }
-
-    pub fn get(&self, path: &str) -> Option<&RootfsNode> {
-        let norm = normalize_rel_path(path)?;
-        self.entries.get(&norm)
-    }
-
-    pub fn get_file_bytes(&self, path: &str) -> Option<&[u8]> {
-        match &self.get(path)?.kind {
-            RootfsNodeKind::File(b) => Some(b.as_slice()),
-            _ => None,
-        }
-    }
-}
-
-pub fn read_tar_from_reader<R: Read>(reader: R) -> Result<RootfsTree, String> {
-    let mut archive = Archive::new(reader);
-    let mut tree = RootfsTree::default();
-    let entries = archive.entries().map_err(|e| format!("tar read error: {}", e))?;
-    for entry_res in entries {
-        let mut entry = entry_res.map_err(|e| format!("tar entry error: {}", e))?;
-        let raw_path = entry
-            .path()
-            .map_err(|e| format!("tar path error: {}", e))?
-            .to_string_lossy()
-            .to_string();
-        let Some(norm) = normalize_rel_path(&raw_path) else {
-            continue;
-        };
-        let mode = (entry.header().mode().unwrap_or(0o644) as u16) & 0o7777;
-        let uid = (entry.header().uid().unwrap_or(0) & 0xFFFF) as u16;
-        let gid = (entry.header().gid().unwrap_or(0) & 0xFFFF) as u16;
-        match entry.header().entry_type() {
-            EntryType::Directory => {
-                tree.insert_dir_with_owner(&norm, if mode == 0 { 0o755 } else { mode }, uid, gid)
-            }
-            EntryType::Symlink => {
-                if let Ok(Some(link)) = entry.link_name() {
-                    tree.insert_symlink_with_owner(
-                        &norm,
-                        link.to_string_lossy().to_string(),
-                        uid,
-                        gid,
-                    );
-                }
-            }
-            EntryType::Regular | EntryType::Continuous => {
-                let mut buf = Vec::new();
-                entry
-                    .read_to_end(&mut buf)
-                    .map_err(|e| format!("tar file read error: {}", e))?;
-                tree.insert_file_with_owner(
-                    &norm,
-                    buf,
-                    if mode == 0 { 0o644 } else { mode },
-                    uid,
-                    gid,
-                );
-            }
-            _ => {}
-        }
-    }
-
-    // If the tar archive wraps a single filesystem image (e.g., `plum-system.ext4` inside `plum-system.tar.gz`),
-    // automatically unpack the inner filesystem image into the RootfsTree.
-    if tree.entries.len() == 1 {
-        let (only_name, only_node) = tree.entries.iter().next().unwrap();
-        if let RootfsNodeKind::File(ref bytes) = only_node.kind {
-            if bytes.len() >= 2048 {
-                let inner_fname = Path::new(only_name)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(only_name.as_str());
-                let board_hint = detect_board_hint_from_filename(inner_fname);
-                if let Ok(mut inner_tree) = extract_payload_bytes_into_tree(bytes) {
-                    if !inner_tree.entries.is_empty() {
-                        if let Some(slug) = board_hint {
-                            if inner_tree.get("etc/quasar-board").is_none() {
-                                inner_tree.insert_file(
-                                    "etc/quasar-board",
-                                    format!("{}\n", slug).into_bytes(),
-                                    0o644,
-                                );
-                            }
-                        }
-                        return Ok(inner_tree);
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(tree)
-}
-
-pub fn read_tar_gz_into_tree(path: &Path) -> Result<RootfsTree, String> {
-    let file = File::open(path).map_err(|e| format!("failed to open '{}': {}", path.display(), e))?;
-    let gz = GzDecoder::new(file);
-    read_tar_from_reader(gz)
-}
-
-pub fn write_tree_to_tar_gz(tree: &RootfsTree, path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let file =
-        File::create(path).map_err(|e| format!("failed to create '{}': {}", path.display(), e))?;
-    let gz = GzEncoder::new(file, Compression::fast());
-    let mut builder = Builder::new(gz);
-
-    for (rel, node) in &tree.entries {
-        let mut header = Header::new_gnu();
-        header.set_uid(node.uid as u64);
-        header.set_gid(node.gid as u64);
-        header.set_mtime(0);
-        match &node.kind {
-            RootfsNodeKind::Dir => {
-                header.set_entry_type(EntryType::Directory);
-                header.set_mode(node.mode as u32);
-                header.set_size(0);
-                header.set_cksum();
-                builder
-                    .append_data(&mut header, format!("{}/", rel), std::io::empty())
-                    .map_err(|e| e.to_string())?;
-            }
-            RootfsNodeKind::File(bytes) => {
-                header.set_entry_type(EntryType::Regular);
-                header.set_mode(node.mode as u32);
-                header.set_size(bytes.len() as u64);
-                header.set_cksum();
-                builder
-                    .append_data(&mut header, rel, Cursor::new(bytes))
-                    .map_err(|e| e.to_string())?;
-            }
-            RootfsNodeKind::Symlink(target) => {
-                header.set_entry_type(EntryType::Symlink);
-                header.set_mode(0o777);
-                header.set_size(0);
-                builder
-                    .append_link(&mut header, rel, target)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    let gz = builder.into_inner().map_err(|e| e.to_string())?;
-    gz.finish().map_err(|e| e.to_string())?;
-    Ok(())
-}
 
 pub fn sanitize_tar_gz_file(path: &Path) -> Result<usize, String> {
     let mut tree = read_tar_gz_into_tree(path)?;
@@ -274,72 +26,6 @@ pub fn sanitize_tar_gz_file(path: &Path) -> Result<usize, String> {
     Ok(removed)
 }
 
-pub fn detect_board_hint_from_filename(name: &str) -> Option<String> {
-    let lower = name.trim().to_ascii_lowercase();
-    for suffix in [
-        "-system.tar.gz",
-        "-system.tgz",
-        "-system.tar",
-        "-system.ext4",
-        "-system-orig.ext4",
-        "-rootfs.tar.gz",
-        "-rootfs.tgz",
-    ] {
-        if let Some(prefix) = lower.strip_suffix(suffix) {
-            if !prefix.is_empty() {
-                return Some(normalize_board_slug(prefix));
-            }
-        }
-    }
-    if let Some(rest) = lower.strip_prefix("dump-") {
-        if let Some((slug_raw, _)) = rest.split_once('-') {
-            if !slug_raw.is_empty() {
-                return Some(normalize_board_slug(slug_raw));
-            }
-        } else if !rest.is_empty() {
-            return Some(normalize_board_slug(rest));
-        }
-    }
-    let normalized = normalize_board_slug(&lower);
-    if matches!(
-        normalized.as_str(),
-        "yandexmini"
-            | "yandexmini2"
-            | "yandexmini2nc"
-            | "yandexmicro"
-            | "plum"
-            | "plumnc"
-            | "station2"
-            | "cucumber"
-            | "orion"
-            | "bergamot"
-            | "pickle"
-            | "mango"
-            | "saturn"
-    ) {
-        return Some(normalized);
-    }
-    None
-}
-
-pub fn detect_board_hint_from_path(path: &Path) -> Option<String> {
-    if let Some(fname) = path.file_name().and_then(|s| s.to_str()) {
-        if let Some(slug) = detect_board_hint_from_filename(fname) {
-            return Some(slug);
-        }
-    }
-    if let Some(parent_name) = path
-        .parent()
-        .and_then(|p| p.file_name())
-        .and_then(|s| s.to_str())
-    {
-        if let Some(slug) = detect_board_hint_from_filename(parent_name) {
-            return Some(slug);
-        }
-    }
-    None
-}
-
 pub fn detect_board_from_tree(tree: &RootfsTree) -> String {
     if let Some(board_bytes) = tree.get_file_bytes("etc/quasar-board") {
         let slug = String::from_utf8_lossy(board_bytes).trim().to_string();
@@ -348,6 +34,22 @@ pub fn detect_board_from_tree(tree: &RootfsTree) -> String {
         }
     }
 
+    // 1. Hardware DTB overlay and DSP firmware files take priority over `quasar.cfg`
+    //    (where Station 2 on Amlogic AXG uses `deviceType: "yandexmidi"`).
+    if tree.get("boot/yandex-cucumber-i2ctop-overlay.dtb").is_some() {
+        return "cucumber".to_string();
+    }
+    if tree.get("boot/yandex-orion-i2c_top-overlay.dtb").is_some() {
+        return "orion".to_string();
+    }
+    if tree.get("lib/firmware/mango-acm8625.cfg").is_some() {
+        return "mango".to_string();
+    }
+    if tree.get("lib/firmware/bergamot-acm8625.cfg").is_some() {
+        return "bergamot".to_string();
+    }
+
+    // 2. Fallback to `quasar.cfg` (disambiguating NC variants by platform IDs)
     if let Some(cfg_bytes) = tree.get_file_bytes("system/vendor/quasar/quasar.cfg") {
         let text = String::from_utf8_lossy(cfg_bytes);
         if let Some(pos) = text.find("\"deviceType\"") {
@@ -373,14 +75,8 @@ pub fn detect_board_from_tree(tree: &RootfsTree) -> String {
         }
     }
 
-    if tree.get("lib/firmware/bergamot-acm8625.cfg").is_some() {
-        "bergamot".to_string()
-    } else if tree.get("etc/init.d/S61leds_brightness").is_some() {
+    if tree.get("etc/init.d/S61leds_brightness").is_some() {
         "yandexmini2".to_string()
-    } else if tree.get("boot/yandex-cucumber-i2ctop-overlay.dtb").is_some() {
-        "cucumber".to_string()
-    } else if tree.get("boot/yandex-orion-i2c_top-overlay.dtb").is_some() {
-        "orion".to_string()
     } else {
         "yandexmini".to_string()
     }
@@ -415,6 +111,7 @@ pub fn sanitize_tree(tree: &mut RootfsTree) {
         "etc/dhcpcd.exit-hook",
         "etc/unbound/unbound.conf.head",
         "etc/init.d/S99zdropbear",
+        "etc/init.d/S99zalicebridge-ssh",
         "etc/init.d/S99z_airplay",
         "etc/init.d/S99zz_jarvis",
         "etc/init.d/S99alinad",
@@ -448,6 +145,12 @@ pub fn sanitize_tree(tree: &mut RootfsTree) {
                     drop_entry = true;
                     break;
                 }
+            }
+        }
+        if !drop_entry && k.starts_with("etc/init.d/S99") {
+            let lc = k.to_ascii_lowercase();
+            if lc.contains("dropbear") || lc.contains("ssh") || lc.contains("alicebridge") {
+                drop_entry = true;
             }
         }
         // 3. Check *.db / *.sqlite* under etc/, var/, root/
@@ -613,8 +316,6 @@ pub fn inject_guest_files(root: &Path, tree: &mut RootfsTree) -> Result<(), Stri
     tree.insert_dir("usr/local/bin", 0o755);
     tree.insert_dir("etc", 0o755);
     tree.insert_dir("etc/init.d", 0o755);
-    tree.insert_dir("etc/dbus-1", 0o755);
-    tree.insert_dir("etc/dbus-1/system.d", 0o755);
 
     let init_path = root.join("guest-init").join("equasar-qemu-init.sh");
     let raw_init = if init_path.is_file() {
@@ -633,23 +334,6 @@ pub fn inject_guest_files(root: &Path, tree: &mut RootfsTree) -> Result<(), Stri
         normalize_crlf_to_lf(EMBEDDED_S99_YAM)
     };
     tree.insert_file("etc/init.d/S99kuyase-yam", raw_s99_yam, 0o755);
-
-    // The legacy Midi/Station 3 renderer registers shairport on the system
-    // bus, whose stock policy denies name ownership to every connection.
-    // Without this the receiver starts but sender transport and voice have
-    // nowhere to go.
-    let dbus_policy_path = root.join("guest-init").join("zz-kuyase-bench.conf");
-    let raw_dbus_policy = if dbus_policy_path.is_file() {
-        let b = fs::read(&dbus_policy_path).map_err(|e| e.to_string())?;
-        normalize_crlf_to_lf(&b)
-    } else {
-        normalize_crlf_to_lf(EMBEDDED_DBUS_BENCH_CONFIG)
-    };
-    tree.insert_file(
-        "etc/dbus-1/system.d/zz-kuyase-bench.conf",
-        raw_dbus_policy,
-        0o644,
-    );
 
     let bridge_bytes = match resolve_bridge_binary(root) {
         Ok(p) => fs::read(&p).map_err(|e| e.to_string())?,
@@ -743,11 +427,9 @@ fn is_single_dump_dir(dir: &Path) -> bool {
     has_tgz && archive_count <= 1
 }
 
-pub fn discover_firmware_dumps(root: &Path) -> Vec<(String, PathBuf)> {
-    let mut dumps = Vec::new();
-    let backups = root.join("backups");
-    let Ok(rd) = fs::read_dir(&backups) else {
-        return dumps;
+fn collect_dumps_recursive(base: &Path, cur: &Path, out: &mut Vec<(String, PathBuf)>) {
+    let Ok(rd) = fs::read_dir(cur) else {
+        return;
     };
     for e in rd.flatten() {
         let p = e.path();
@@ -757,23 +439,25 @@ pub fn discover_firmware_dumps(root: &Path) -> Vec<(String, PathBuf)> {
         if is_ignored_backup_entry(name) {
             continue;
         }
+        let rel = p
+            .strip_prefix(base)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| name.to_string());
         if p.is_dir() && !is_single_dump_dir(&p) {
-            if let Ok(sub_rd) = fs::read_dir(&p) {
-                for sub_e in sub_rd.flatten() {
-                    let sp = sub_e.path();
-                    let Some(sname) = sp.file_name().and_then(|s| s.to_str()) else {
-                        continue;
-                    };
-                    if is_ignored_backup_entry(sname) {
-                        continue;
-                    }
-                    dumps.push((format!("{}/{}", name, sname), sp));
-                }
-            }
+            collect_dumps_recursive(base, &p, out);
         } else {
-            dumps.push((name.to_string(), p));
+            out.push((rel, p));
         }
     }
+}
+
+pub fn discover_firmware_dumps(root: &Path) -> Vec<(String, PathBuf)> {
+    let mut dumps = Vec::new();
+    let backups = root.join("backups");
+    if !backups.is_dir() {
+        return dumps;
+    }
+    collect_dumps_recursive(&backups, &backups, &mut dumps);
     dumps.sort_by(|a, b| a.0.cmp(&b.0));
     dumps
 }
@@ -845,16 +529,10 @@ pub fn prepare_images(
             let req_slug = requested_board
                 .filter(|b| !b.trim().is_empty() && !b.eq_ignore_ascii_case("auto"))
                 .map(normalize_board_slug);
-            let rd = fs::read_dir(dp).map_err(|e| e.to_string())?;
-            let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
-            paths.sort();
-            for sp in paths {
-                let Some(sname) = sp.file_name().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                if is_ignored_backup_entry(sname) {
-                    continue;
-                }
+            let mut candidates = Vec::new();
+            collect_dumps_recursive(dp, dp, &mut candidates);
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            for (_, sp) in candidates {
                 if let Some(ref target_slug) = req_slug {
                     if let Some(hint) = detect_board_hint_from_path(&sp) {
                         if &hint != target_slug {
@@ -875,32 +553,50 @@ pub fn prepare_images(
     if let Some(b) = requested_board {
         let candidate = Path::new(b);
         if candidate.exists() {
-            let res = build_guest_image_from_dump(root, None, candidate, None)?;
-            return Ok(vec![res]);
+            return prepare_images(root, None, Some(candidate));
         }
         let slug = normalize_board_slug(b);
+        // Priority is given to ready Guest Images in work/<board>-system.ext4
+        let existing = root.join("work").join(format!("{}-system.ext4", slug));
+        if existing.is_file() {
+            let res = build_guest_image_from_dump(root, Some(&slug), &existing, None)?;
+            return Ok(vec![res]);
+        }
         for (_, dp) in discover_firmware_dumps(root) {
             if detect_board_hint_from_path(&dp).as_deref() == Some(slug.as_str()) {
                 let res = build_guest_image_from_dump(root, Some(&slug), &dp, None)?;
                 return Ok(vec![res]);
             }
         }
-        let existing = root.join("work").join(format!("{}-system.ext4", slug));
-        if existing.is_file() {
-            let res = build_guest_image_from_dump(root, Some(&slug), &existing, None)?;
-            return Ok(vec![res]);
-        }
     }
 
+    let work_images = crate::session::discover_guest_images(root);
     let discovered = discover_firmware_dumps(root);
-    if discovered.is_empty() {
+    if work_images.is_empty() && discovered.is_empty() {
         return Err(format!(
-            "no firmware dumps found in {}/backups (use --dump <path> or run `kuyase dump <ip>`)",
+            "no guest images in {}/work and no firmware dumps in {}/backups (use --dump <path> or run `kuyase dump <ip>`)",
+            root.display(),
             root.display()
         ));
     }
     let mut built = Vec::new();
+    let mut handled_slugs = std::collections::BTreeSet::new();
+    for (slug, img_path) in work_images {
+        if let Some(req) = requested_board.filter(|s| !s.trim().is_empty() && !s.eq_ignore_ascii_case("auto")) {
+            if normalize_board_slug(req) != slug {
+                continue;
+            }
+        }
+        handled_slugs.insert(slug.clone());
+        built.push(build_guest_image_from_dump(root, Some(&slug), &img_path, None)?);
+    }
     for (_, p) in discovered {
+        if let Some(hint) = detect_board_hint_from_path(&p) {
+            if handled_slugs.contains(&hint) {
+                continue;
+            }
+            handled_slugs.insert(hint);
+        }
         built.push(build_guest_image_from_dump(root, requested_board, &p, None)?);
     }
     Ok(built)
@@ -988,16 +684,6 @@ mod tests {
         assert!(!s99_yam_bytes.contains(&b'\r'));
         assert!(String::from_utf8_lossy(s99_yam_bytes).contains("/data/yam/bin/luna"));
 
-        let dbus_policy_node = readback
-            .get("etc/dbus-1/system.d/zz-kuyase-bench.conf")
-            .unwrap();
-        assert_eq!(dbus_policy_node.mode, 0o644);
-        let dbus_policy_bytes = readback
-            .get_file_bytes("etc/dbus-1/system.d/zz-kuyase-bench.conf")
-            .unwrap();
-        assert!(!dbus_policy_bytes.contains(&b'\r'));
-        assert!(String::from_utf8_lossy(dbus_policy_bytes).contains("allow own=\"*\""));
-
         let bridge_node = readback.get("usr/local/bin/qemu-hw-bridge").unwrap();
         assert_eq!(bridge_node.mode, 0o755);
         assert_eq!(
@@ -1014,7 +700,7 @@ mod tests {
             b"yandexmini2\n"
         );
 
-        // Verify tar.gz wrapping a single .ext4 image (like backups/kuyase-out/plumnc-system.tar.gz)
+        // Verify tar.gz wrapping a single .ext4 image (e.g. plumnc-system.tar.gz)
         let mut inner_ext4_tree = RootfsTree::default();
         inner_ext4_tree.insert_file(
             "system/vendor/quasar/quasar.cfg",

@@ -28,6 +28,21 @@ pub fn adb_payload_checksum(data: &[u8]) -> u32 {
     data.iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
 }
 
+fn has_kuyase_exit_marker(buf: &[u8]) -> bool {
+    const MARKER: &[u8] = b"__KUYASE_EXIT_CODE=";
+    let Some(pos) = buf.windows(MARKER.len()).rposition(|w| w == MARKER) else {
+        return false;
+    };
+    let tail = &buf[pos + MARKER.len()..];
+    let Some(nl_pos) = tail.iter().position(|&b| b == b'\n') else {
+        return false;
+    };
+    nl_pos > 0
+        && tail[..nl_pos]
+            .iter()
+            .all(|&b| b.is_ascii_digit() || b == b'\r' || b == b'-')
+}
+
 pub fn write_adb_packet<W: Write>(
     writer: &mut W,
     command: u32,
@@ -187,6 +202,34 @@ impl AdbClient {
     }
 
     pub fn shell(&self, command: &str, timeout: Duration) -> Result<String, String> {
+        if command.len() > 1800 {
+            let step_timeout = Duration::from_secs(15);
+            self.shell_raw("rm -f /tmp/.kuyase-exec.sh", step_timeout)?;
+            let mut chunk = String::new();
+            for ch in command.chars() {
+                chunk.push(ch);
+                if chunk.len() >= 1200 {
+                    let escaped = chunk.replace('\'', "'\\''");
+                    self.shell_raw(
+                        &format!("printf '%s' '{}' >> /tmp/.kuyase-exec.sh", escaped),
+                        step_timeout,
+                    )?;
+                    chunk.clear();
+                }
+            }
+            if !chunk.is_empty() {
+                let escaped = chunk.replace('\'', "'\\''");
+                self.shell_raw(
+                    &format!("printf '%s' '{}' >> /tmp/.kuyase-exec.sh", escaped),
+                    step_timeout,
+                )?;
+            }
+            return self.shell_raw("sh /tmp/.kuyase-exec.sh", timeout);
+        }
+        self.shell_raw(command, timeout)
+    }
+
+    fn shell_raw(&self, command: &str, timeout: Duration) -> Result<String, String> {
         let deadline = Instant::now() + timeout;
         let mut last_err = String::from("ADB shell timed out");
 
@@ -226,6 +269,7 @@ impl AdbClient {
 
             let mut output = Vec::new();
             let mut got_clse = false;
+            let mut early_marker_close = false;
             let mut stream_err = None;
 
             loop {
@@ -241,6 +285,18 @@ impl AdbClient {
                                 write_adb_packet(&mut stream, A_OKAY, local_id, remote_id, b"")
                             {
                                 stream_err = Some(format!("ADB OKAY write failed: {}", e));
+                                break;
+                            }
+                            if has_kuyase_exit_marker(&output) {
+                                let _ = write_adb_packet(
+                                    &mut stream,
+                                    A_CLSE,
+                                    local_id,
+                                    remote_id,
+                                    b"",
+                                );
+                                got_clse = true;
+                                early_marker_close = true;
                                 break;
                             }
                         }
@@ -263,8 +319,12 @@ impl AdbClient {
             }
 
             if got_clse && stream_err.is_none() {
-                let next_id = local_id.wrapping_add(1).max(1);
-                *self.conn.lock().unwrap() = Some((stream, next_id));
+                if early_marker_close {
+                    let _ = stream.shutdown(Shutdown::Both);
+                } else {
+                    let next_id = local_id.wrapping_add(1).max(1);
+                    *self.conn.lock().unwrap() = Some((stream, next_id));
+                }
                 let text = String::from_utf8_lossy(&output).replace("\r\n", "\n");
                 return Ok(text.trim_matches(|c| c == '\r' || c == '\n').to_string());
             }

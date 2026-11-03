@@ -1,3 +1,12 @@
+pub mod boards;
+pub mod display;
+
+pub use boards::{
+    board_display_label, board_has_matrix_21x12, board_has_segment_clock, default_board_ring_leds,
+    detect_board_hint_from_filename, detect_board_hint_from_path, detect_board_slug_from_probe,
+    find_board_descriptor, normalize_board_slug, BoardDescriptor, BOARD_CATALOG,
+};
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -174,6 +183,7 @@ pub struct CommandAckPayload {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum GuestPacket {
     StateSnapshot(BridgeStateSnapshot),
     PcmAudioChunk(Vec<u8>),
@@ -301,25 +311,6 @@ pub fn build_wav_bytes(pcm: &[u8], sample_rate: u32, channels: u16) -> Vec<u8> {
     out
 }
 
-pub fn normalize_board_slug(raw: &str) -> String {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "station-lite" | "lite" | "lite1" | "micro" | "yandexmicro" => "yandexmicro".to_string(),
-        "mini" | "mini1" | "yandexmini" => "yandexmini".to_string(),
-        "mini2" | "yandexmini_2" | "yandexmini2" => "yandexmini2".to_string(),
-        "mini2nc" | "yandexmini_2_nc" | "yandexmini2nc" => "yandexmini2nc".to_string(),
-        "mini3" | "yandexmini_3" | "yandexmini3" | "bergamot" => "bergamot".to_string(),
-        "mini3pro" | "pickle" => "pickle".to_string(),
-        "lite2" | "plum" => "plum".to_string(),
-        "prune" | "lite2nc" | "plumnc" => "plumnc".to_string(),
-        "midi" | "cucumber" => "cucumber".to_string(),
-        "station3" | "orion" => "orion".to_string(),
-        "station_2" | "station-midi" | "yandexmidi" | "station2" => "station2".to_string(),
-        "street" | "mango" => "mango".to_string(),
-        "hub" | "saturn" => "saturn".to_string(),
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,15 +379,17 @@ mod tests {
 
     #[test]
     fn test_guest_packet_roundtrip_all_variants() {
-        let mut state = BridgeStateSnapshot::default();
-        state.board_slug = "orion".to_string();
-        state.board_name = "Яндекс Станция 3 (YNDX-00055 / orion)".to_string();
-        state.ring_leds = 36;
-        state.ambilight_leds = 12;
-        state.aux_light_kind = "ambilight".to_string();
-        state.display_kind = "matrix_21x12".to_string();
-        state.ring_pixels = vec![[107, 15, 255]; 36];
-        state.logo_pixels = vec![[200, 110, 255]; 12];
+        let mut state = BridgeStateSnapshot {
+            board_slug: "orion".to_string(),
+            board_name: "Яндекс Станция 3 (YNDX-00055 / orion)".to_string(),
+            ring_leds: 36,
+            ambilight_leds: 12,
+            aux_light_kind: "ambilight".to_string(),
+            display_kind: "matrix_21x12".to_string(),
+            ring_pixels: vec![[107, 15, 255]; 36],
+            logo_pixels: vec![[200, 110, 255]; 12],
+            ..Default::default()
+        };
         state.amplifiers.push(AmplifierSlotState {
             i2c_device: "3-002d".to_string(),
             role: "woofer".to_string(),
@@ -467,5 +460,78 @@ mod tests {
         assert_eq!(normalize_board_slug("station-midi"), "station2");
         assert_eq!(normalize_board_slug("midi"), "cucumber");
         assert_eq!(normalize_board_slug("station3"), "orion");
+
+        assert_eq!(
+            detect_board_hint_from_filename("bergamot-0.373.1.13.zip").as_deref(),
+            Some("bergamot")
+        );
+        assert_eq!(
+            detect_board_hint_from_filename("bergamot-0.373.1.13-rootfs.tar.gz").as_deref(),
+            Some("bergamot")
+        );
+        assert_eq!(
+            detect_board_hint_from_filename("station-lite-rootfs-2026-10-24.tgz").as_deref(),
+            Some("yandexmicro")
+        );
+        assert_eq!(
+            detect_board_hint_from_filename("Yandex-Station3-Orion-factory-13").as_deref(),
+            Some("orion")
+        );
+        assert_eq!(
+            detect_board_hint_from_filename("yandex-mini2-backup.zip").as_deref(),
+            Some("yandexmini2")
+        );
+        assert_eq!(detect_board_hint_from_filename("rootfs.tar.gz"), None);
+
+        assert_eq!(detect_board_slug_from_probe("mini2", ""), "yandexmini2");
+        assert_eq!(
+            detect_board_slug_from_probe("plum", "yandex,prune-evt2 yandex,prune"),
+            "plumnc"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("plum", "yandex,plum-evt2 yandex,plum"),
+            "plum"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("yandexmidi", "yandex,station-midi amlogic, axg"),
+            "station2"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("yandexmidi", "yandex,cucumber-dvt2 amlogic, a5"),
+            "cucumber"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("cucumber", "yandex,cucumber-dvt2 yandex,cucumber amlogic, a5"),
+            "cucumber"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("station3", "yandex,orion"),
+            "orion"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("", "yandex,cucumber-dvt2 amlogic,a5"),
+            "cucumber"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("", "amlogic, axg Amlogic"),
+            "yandexmini"
+        );
+        assert_eq!(detect_board_slug_from_probe("lite1", ""), "yandexmicro");
+        assert_eq!(
+            detect_board_slug_from_probe("bergamot", "yandex,bergamot amlogic,axg"),
+            "bergamot"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("", "yandex,bergamot amlogic,axg"),
+            "bergamot"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("mango", "yandex,mango amlogic,a1"),
+            "mango"
+        );
+        assert_eq!(
+            detect_board_slug_from_probe("", "yandex,mango amlogic,a1 Yandex Station Mango DVT"),
+            "mango"
+        );
     }
 }

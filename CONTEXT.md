@@ -11,7 +11,7 @@
 _Avoid_: `deviceType`, модель, маркетинговое название, сокращённый алиас (`mini2`, `lite1`, `prune`, `station3`, `yandex,station-midi`).
 
 **Реестр периферии платы (`Board Peripherals`)**:
-Составной контейнер в `hw-bridge/src/devices.rs` (`BoardPeripherals`), объединяющий 4 полиморфных доменных трейта устройства для текущего профиля платы: `LedRingDevice` (верхнее кольцо), `AuxLightDevice` (эмбиент `12×2 RGBW` или логотип), `FrontDisplayDevice` (7-сегментные часы `sysfs` или монохромная матрица `21×12` `/dev/fb1`) и `AudioSubsystemDevice` (четыре I2C-усилителя `ACM8625S` и ультразвуковой TDM-тракт `pcm.ultrasound`).
+Составной контейнер в `hw-bridge/src/devices/mod.rs` (`BoardPeripherals`), объединяющий 4 полиморфных доменных трейта устройства для текущего профиля платы: `LedRingDevice` (верхнее кольцо), `AuxLightDevice` (эмбиент `12×2 RGBW` или логотип), `FrontDisplayDevice` (7-сегментные часы `sysfs` или монохромная матрица `21×12` `/dev/fb1`) и `AudioSubsystemDevice` (четыре I2C-усилителя `ACM8625S` и ультразвуковой TDM-тракт `pcm.ultrasound`).
 _Avoid_: менеджер драйверов, глобальный синглтон железа.
 
 **Системный дамп (`Firmware Dump`)**:
