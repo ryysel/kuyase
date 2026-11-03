@@ -9,6 +9,7 @@ pub(crate) const UBIFS_DATA_NODE: u8 = 1;
 pub(crate) const UBIFS_DENT_NODE: u8 = 2;
 
 pub(crate) const UBIFS_COMPR_NONE: u16 = 0;
+const UBIFS_COMPR_LZO: u16 = 1;
 const UBIFS_COMPR_ZLIB: u16 = 2;
 
 const S_IFMT: u16 = 0xF000;
@@ -39,6 +40,24 @@ struct UbifsDent {
 struct UbifsDataBlock {
     sqnum: u64,
     bytes: Vec<u8>,
+}
+
+fn decompress_lzo1x(input: &[u8], uncomp_len: usize) -> Result<Vec<u8>, String> {
+    let mut out = vec![0u8; uncomp_len];
+    // UBIFS pads a data node to an 8-byte boundary and `node_len` may include
+    // that padding, while LZO1X expects the input to end exactly at the
+    // end-of-stream marker. Try the exact payload first, then drop up to 7
+    // trailing padding bytes.
+    let max_trim = input.len().saturating_sub(1).min(7);
+    for trim in 0..=max_trim {
+        let candidate = &input[..input.len() - trim];
+        if let Ok(n) = lzo::decompress_into(candidate, &mut out) {
+            if n == uncomp_len {
+                return Ok(out);
+            }
+        }
+    }
+    Err("lzo1x decompression failed".to_string())
 }
 
 pub fn extract_ubifs_into_tree(raw: &[u8]) -> Result<RootfsTree, String> {
@@ -148,6 +167,7 @@ pub fn extract_ubifs_into_tree(raw: &[u8]) -> Result<RootfsTree, String> {
                 if replace {
                     let decoded = match compr_type {
                         UBIFS_COMPR_NONE => payload[..payload.len().min(uncomp_len)].to_vec(),
+                        UBIFS_COMPR_LZO => decompress_lzo1x(payload, uncomp_len).unwrap_or_default(),
                         UBIFS_COMPR_ZLIB => {
                             decompress_zlib_or_deflate(payload).unwrap_or_default()
                         }

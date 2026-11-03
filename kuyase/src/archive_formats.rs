@@ -46,6 +46,80 @@ fn detect_ubi_peb_size(raw: &[u8], first_data_offset: usize) -> usize {
     raw.len()
 }
 
+pub fn is_cpio_newc(raw: &[u8]) -> bool {
+    raw.len() >= 6 && (raw.starts_with(b"070701") || raw.starts_with(b"070702"))
+}
+
+fn cpio_hex(field: &[u8]) -> Result<usize, String> {
+    let text = std::str::from_utf8(field).map_err(|_| "invalid cpio header".to_string())?;
+    usize::from_str_radix(text, 16).map_err(|_| "invalid cpio header".to_string())
+}
+
+/// Extract the root filesystem from a `swupdate` CPIO newc archive. OTAs on the
+/// update servers are named `.zip` but are often a bare `070701`/`070702`
+/// container holding `rootfs.ubifs` alongside the encrypted boot images.
+pub fn extract_cpio_rootfs_into_tree(raw: &[u8]) -> Result<RootfsTree, String> {
+    if !is_cpio_newc(raw) {
+        return Err("not a cpio newc archive".to_string());
+    }
+
+    let mut entries: Vec<(String, &[u8])> = Vec::new();
+    let mut pos = 0usize;
+    while pos + 110 <= raw.len() {
+        let header = &raw[pos..pos + 110];
+        if !is_cpio_newc(header) {
+            break;
+        }
+        let filesize = cpio_hex(&header[54..62])?;
+        let namesize = cpio_hex(&header[94..102])?;
+        if namesize == 0 || pos + 110 + namesize > raw.len() {
+            break;
+        }
+        let name_raw = &raw[pos + 110..pos + 110 + namesize];
+        let name = String::from_utf8_lossy(name_raw)
+            .trim_end_matches('\0')
+            .to_string();
+        let data_start = (pos + 110 + namesize + 3) & !3;
+        let data_end = data_start + filesize;
+        if data_end > raw.len() {
+            break;
+        }
+        if name == "TRAILER!!!" {
+            break;
+        }
+        entries.push((name, &raw[data_start..data_end]));
+        pos = (data_end + 3) & !3;
+    }
+
+    if entries.is_empty() {
+        return Err("cpio archive has no entries".to_string());
+    }
+
+    if let Some((_, data)) = entries
+        .iter()
+        .find(|(name, _)| name.trim_start_matches("./").ends_with("rootfs.ubifs"))
+    {
+        return extract_payload_bytes_into_tree(data);
+    }
+
+    // Some builds name the volume differently; fall back to the largest member
+    // that looks like a filesystem image.
+    if let Some((_, data)) = entries.iter().max_by_key(|(_, data)| data.len()) {
+        if data.len() > 1024 {
+            if let Ok(tree) = extract_payload_bytes_into_tree(data) {
+                return Ok(tree);
+            }
+        }
+    }
+
+    let names = entries
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!("cpio archive has no rootfs payload ({})", names))
+}
+
 pub fn extract_payload_bytes_into_tree(payload: &[u8]) -> Result<RootfsTree, String> {
     if payload.len() >= 4 {
         let magic_le = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);

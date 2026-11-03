@@ -1,4 +1,7 @@
-use crate::archive_formats::{extract_payload_bytes_into_tree, extract_ubi_into_tree, UBI_EC_MAGIC};
+use crate::archive_formats::{
+    extract_cpio_rootfs_into_tree, extract_payload_bytes_into_tree, extract_ubi_into_tree,
+    is_cpio_newc, UBI_EC_MAGIC,
+};
 use crate::ext_fs::write_ext2_image;
 pub use crate::rootfs_tree::{
     normalize_rel_path, read_tar_from_reader, read_tar_gz_into_tree, write_tree_to_tar_gz,
@@ -235,6 +238,22 @@ fn load_dump_into_tree(path: &Path) -> Result<RootfsTree, String> {
         return read_tar_from_reader(f);
     }
     if name.ends_with(".zip") {
+        // Update servers serve `swupdate` CPIO newc containers under a `.zip`
+        // name. Sniff the magic before handing the file to the ZIP reader.
+        let mut probe = File::open(path).map_err(|e| e.to_string())?;
+        let mut head = [0u8; 6];
+        let read = probe.read(&mut head).map_err(|e| e.to_string())?;
+        drop(probe);
+        if read == head.len() && is_cpio_newc(&head) {
+            let raw = fs::read(path).map_err(|e| e.to_string())?;
+            return extract_cpio_rootfs_into_tree(&raw);
+        }
+        if read == head.len() && !head.starts_with(b"PK") {
+            return Err(format!(
+                "'{}' is neither a ZIP nor a cpio newc archive; the OTA payload is probably encrypted",
+                path.display()
+            ));
+        }
         let f = File::open(path).map_err(|e| e.to_string())?;
         let mut za = zip::ZipArchive::new(f).map_err(|e| format!("zip error: {}", e))?;
         // Check if zip contains a nested rootfs.tar.gz
