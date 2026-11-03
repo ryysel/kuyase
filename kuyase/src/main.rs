@@ -286,7 +286,7 @@ fn run_single_headless_board(
 
     let result = (|| -> Result<(), String> {
         let bridge_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.bridge_port);
-        let bridge = BridgeClient::connect_with_timeout(bridge_addr, Duration::from_secs(25))?;
+        let bridge = BridgeClient::connect_with_timeout(bridge_addr, Duration::from_secs(90))?;
 
         let initial_state = bridge.latest_state();
         let refreshed_state = bridge.request_state()?;

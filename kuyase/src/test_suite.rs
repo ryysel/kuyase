@@ -88,7 +88,7 @@ pub fn run_board_verification(
     let res = (|| -> Result<(), String> {
         // 1. Verify Duplex Bridge (:18091 -> :8091) & auto-detected Board Profile
         let bridge_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bridge_port);
-        let bridge = BridgeClient::connect_with_timeout(bridge_addr, Duration::from_secs(25))?;
+        let bridge = BridgeClient::connect_with_timeout(bridge_addr, Duration::from_secs(90))?;
         let st = bridge.request_state()?;
         if !st.ok {
             return Err(format!("[{}] bridge state ok == false", board));
