@@ -18,13 +18,20 @@ touch /data/yam/yam.lock
 
 # Luna's own boot auto-start runs while its HTTP API is not yet answering, so
 # plugins that call back into Luna time out. Start Luna with an empty service
-# list and bring AirPlay up explicitly once the API is responsive.
+# list, then bring the services that were enabled before the reboot back once
+# the API is responsive. The list is preserved so a package installed and
+# enabled on the bench survives a reboot exactly like on a real speaker.
 #
 # Do NOT auto-start station.volume: `native-volume watch` busy-loops in the
 # emulator, eats a whole vCPU and starves Luna's HTTP API. AirPlay runs with
 # native_volume=false, so the plugin is only needed for its guard script.
+state=/data/luna/plugins/services.json
+saved_services=
+if [ -f "$state" ]; then
+  saved_services=$(sed -n 's/^[[:space:]]*"\([^"]*\)".*/\1/p' "$state" 2>/dev/null | tr '\n' ' ')
+fi
 if [ -d /data/luna/plugins ]; then
-  printf '[]\n' > /data/luna/plugins/services.json
+  printf '[]\n' > "$state"
 fi
 
 if ! pidof luna >/dev/null 2>&1; then
@@ -35,6 +42,15 @@ fi
 
 if [ -x /data/luna-ctl ]; then
   /data/luna-ctl wait || exit 0
+
+  # Re-enable everything that was enabled before the reboot. station.airplay
+  # has its own start logic below.
+  for id in $saved_services; do
+    case "$id" in
+      station.airplay) continue ;;
+    esac
+    /data/luna-ctl enable "$id" >/dev/null 2>&1 || true
+  done
 
   airplay_up() {
     /data/luna-ctl running station.airplay >/dev/null 2>&1 \
